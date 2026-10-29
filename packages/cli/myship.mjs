@@ -57,11 +57,22 @@ const MIME_MAP = {
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
   '.webp': 'image/webp',
+  '.gif': 'image/gif',
   '.ico': 'image/x-icon',
   '.txt': 'text/plain; charset=UTF-8',
   '.md': 'text/plain; charset=UTF-8',
   '.woff': 'font/woff',
   '.woff2': 'font/woff2',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.ogg': 'audio/ogg',
+  '.tgz': 'application/gzip',
+  '.gz': 'application/gzip',
+  '.pdf': 'application/pdf',
+  '.wasm': 'application/wasm',
+  '.xml': 'application/xml; charset=UTF-8',
 };
 
 const BLOCKED_DIRS = new Set([

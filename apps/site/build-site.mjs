@@ -996,6 +996,21 @@ function generateSiteHtml(parsedDocs, searchEntries, mcpConfig) {
         </div>
       </div>
 
+      <div class="section-head" style="margin-top: 48px;">
+        <h2>🎬 MyShip 2026 产品发布与全景愿景大片 (Keynote Video)</h2>
+        <p>由 Remotion 编程级动态图形引擎 + 神经网络中文配音 + 120 BPM 原创电子合成器配乐打造，全景呈现 Phase 0/1 核心架构与 Phase 2/3 远期蓝图。</p>
+      </div>
+
+      <div style="margin: 24px 0 56px; border-radius: 22px; overflow: hidden; border: 1px solid rgba(56, 189, 248, 0.35); background: rgba(7, 11, 22, 0.9); box-shadow: 0 28px 70px rgba(0, 0, 0, 0.55), 0 0 40px rgba(56, 189, 248, 0.14);">
+        <video
+          controls
+          preload="none"
+          poster="/keynote-poster.jpg"
+          src="/myship-promo.mp4"
+          style="width: 100%; display: block; aspect-ratio: 16 / 9; background: #050811;"
+        ></video>
+      </div>
+
       <div class="section-head">
         <h2>探索开源文档中心</h2>
         <p>所有文档均位于仓库 <code>docs/*.md</code>，支持右上角一键复制 Markdown 给 LLM 或在线缩放拖拽架构图。</p>

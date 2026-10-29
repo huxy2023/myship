@@ -1,6 +1,7 @@
 node_modules/
 dist/
 apps/site/dist/
+apps/video/
 .myship/history.json
 .myship/*.dist.js
 **/.cas-storage/
