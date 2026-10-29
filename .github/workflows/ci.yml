@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    name: Test CAS Engine & Build Docs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run Local CAS Sandbox End-to-End Tests
+        run: pnpm demo
+
+      - name: Verify EdgeOne Function Template Generation
+        run: |
+          COS_ORIGIN="https://myship-1250000000.cos.ap-guangzhou.myqcloud.com" \
+          SHIP_REMOTE_DOMAIN="ship.example.com" \
+          node packages/cli/myship.mjs build-edge-fn
+          rm -rf .myship
+
+      - name: Build Portal & Documentation Site
+        run: pnpm build:site
+
+      - name: Verify NPM Package Tarball (Dry Run)
+        run: npm pack --dry-run

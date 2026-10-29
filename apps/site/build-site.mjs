@@ -953,7 +953,7 @@ function generateSiteHtml(parsedDocs, searchEntries, mcpConfig) {
             </button>
           </div>
           <div class="quick-install-bar">
-            <span>$ npm i -g github:huxy2023/myship &amp;&amp; myship login</span>
+            <span>$ npm i -g myship &amp;&amp; myship login</span>
             <button type="button" id="hero-copy-cmd" title="复制安装命令">📋</button>
           </div>
         </div>
@@ -1320,7 +1320,7 @@ function generateSiteHtml(parsedDocs, searchEntries, mcpConfig) {
     });
 
     document.getElementById('hero-copy-cmd').addEventListener('click', () => {
-      copyText('npm i -g github:huxy2023/myship && myship login', '✅ 已复制安装与登录命令');
+      copyText('npm i -g myship && myship login', '✅ 已复制安装与登录命令');
     });
 
     document.querySelectorAll('[data-copy-target]').forEach(btn => {

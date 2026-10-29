@@ -26,13 +26,11 @@
 在任何安装了 Node.js (`>=20.0.0`) 的电脑上：
 
 ```bash
-# 方式 A：直接从 GitHub 全局安装（无需克隆源码，0 外部 npm 依赖）
-npm i -g github:huxy2023/myship
+# 方式 A：直接从 NPM 官方源全局安装（推荐，国内镜像毫秒级同步，0 外部依赖）
+npm i -g myship
 
-# 方式 B：如果已克隆本仓库到本地
-git clone https://github.com/huxy2023/myship.git
-cd myship
-npm link
+# 方式 B：直接从 GitHub 仓库安装最新开发版
+npm i -g github:huxy2023/myship
 ```
 
 ### 2. 绑定你的自有云底座 (`myship login`)

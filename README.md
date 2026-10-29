@@ -3,6 +3,7 @@
 **Build your own personal `surge.sh` + `Vercel` on Tencent Cloud EdgeOne & COS in 10 minutes.**  
 **基于自有云设施（BYOC）的零依赖、高 DX 内容寻址（CAS）静态部署与泛域名路由引擎。**
 
+[![NPM Version](https://img.shields.io/npm/v/myship.svg?color=cb3837)](https://www.npmjs.com/package/myship)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20.0.0-339933.svg)](https://nodejs.org/)
 [![Dependencies](https://img.shields.io/badge/Dependencies-Zero-brightgreen.svg)](./packages/cli/package.json)
@@ -53,10 +54,12 @@ pnpm build:site
 
 ### 第 1 步：全局安装 `myship` CLI
 
-在任意电脑上直接从 GitHub 安装（或在本仓库下执行 `npm link`）：
+直接从 NPM 官方源（或国内淘宝镜像）一键安装：
 
 ```bash
-npm i -g github:huxy2023/myship
+npm i -g myship
+# 或免安装直接运行：
+npx myship
 ```
 
 ### 第 2 步：绑定你的腾讯云凭证与云底座配置

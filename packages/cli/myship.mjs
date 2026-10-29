@@ -943,6 +943,8 @@ if (isMainModule) {
       // flag handled
     } else if (arg === '--help' || arg === '-h') {
       positional.push('help');
+    } else if (arg === '--version' || arg === '-v') {
+      positional.push('version');
     } else {
       positional.push(arg);
     }
@@ -951,6 +953,15 @@ if (isMainModule) {
   const first = positional[0];
 
   (async () => {
+    if (first === 'version') {
+      try {
+        const rootPkg = JSON.parse(readFileSync(resolve(__dirname, '../../package.json'), 'utf8'));
+        console.log(`myship v${rootPkg.version}`);
+      } catch {
+        console.log('myship v1.0.0');
+      }
+      return;
+    }
     if (first === 'help') {
       printHelp();
       return;
