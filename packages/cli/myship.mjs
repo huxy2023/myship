@@ -60,6 +60,46 @@ const MIME_MAP = {
   '.woff2': 'font/woff2',
 };
 
+const BLOCKED_DIRS = new Set([
+  '.git',
+  '.myship',
+  '.vercel',
+  '.edgeone',
+  '.ssh',
+  '.tccli',
+  'node_modules',
+  '.cas-storage',
+]);
+
+function isSensitiveEntry(entryName) {
+  const lower = entryName.toLowerCase();
+  if (lower === '.ds_store' || lower === '.npmrc' || lower === '.netrc') return true;
+  if (lower === '.env' || lower.startsWith('.env.')) return true;
+  if (
+    lower.endsWith('.pem') ||
+    lower.endsWith('.key') ||
+    lower.endsWith('.credential') ||
+    lower.endsWith('.p12') ||
+    lower.endsWith('.pfx')
+  ) {
+    return true;
+  }
+  if (lower === 'id_rsa' || lower === 'id_ed25519') return true;
+  return false;
+}
+
+export function ensureMyShipGitignore(myshipDir) {
+  mkdirSync(myshipDir, { recursive: true });
+  const gitignorePath = resolve(myshipDir, '.gitignore');
+  if (!existsSync(gitignorePath)) {
+    writeFileSync(
+      gitignorePath,
+      '# Automatically created by MyShip CLI to prevent accidental leaks\n*\n!project.json\n!.gitignore\n',
+      'utf8'
+    );
+  }
+}
+
 function ensureStorageDirs(storageDir) {
   mkdirSync(resolve(storageDir, 'blobs'), { recursive: true });
   mkdirSync(resolve(storageDir, 'manifests'), { recursive: true });
@@ -69,6 +109,15 @@ function ensureStorageDirs(storageDir) {
 function walkFiles(dir, baseDir = dir) {
   const results = [];
   for (const entry of readdirSync(dir)) {
+    if (BLOCKED_DIRS.has(entry)) {
+      continue;
+    }
+    if (isSensitiveEntry(entry)) {
+      if (entry !== '.DS_Store') {
+        console.warn(`  🛡️  [安全防泄漏] 已自动拦截并跳过敏感文件: ${entry}`);
+      }
+      continue;
+    }
     const full = resolve(dir, entry);
     const stat = statSync(full);
     if (stat.isDirectory()) {
@@ -181,7 +230,7 @@ export function detectProjectContext(cwd = process.cwd(), explicitProject = null
 
 export function ensureProjectConfig(cwd = process.cwd(), overrides = {}) {
   const ctx = detectProjectContext(cwd, overrides.project);
-  mkdirSync(ctx.myshipDir, { recursive: true });
+  ensureMyShipGitignore(ctx.myshipDir);
   const payload = {
     project: overrides.project ? normalizeDomainToken(overrides.project) : ctx.project,
     dir: overrides.dir || ctx.buildDir || './dist',
@@ -199,7 +248,7 @@ export function ensureProjectConfig(cwd = process.cwd(), overrides = {}) {
 function appendLocalProjectHistory(cwd, entry) {
   try {
     const myshipDir = resolve(cwd, '.myship');
-    mkdirSync(myshipDir, { recursive: true });
+    ensureMyShipGitignore(myshipDir);
     const historyPath = resolve(myshipDir, 'history.json');
     let list = [];
     if (existsSync(historyPath)) {
@@ -286,7 +335,6 @@ export function deployDirectory(
     project,
     immutableSubdomain,
     createdAt: new Date().toISOString(),
-    sourceDir: absTarget,
     stats: {
       totalFiles: files.length,
       uploadedBlobs,
@@ -733,6 +781,9 @@ export function generateEdgeFunctionCode({ cosOrigin, outputPath } = {}) {
 
   const outFile = outputPath || resolve(process.cwd(), '.myship', 'edgeone-function.dist.js');
   mkdirSync(dirname(outFile), { recursive: true });
+  if (basename(dirname(outFile)) === '.myship') {
+    ensureMyShipGitignore(dirname(outFile));
+  }
   writeFileSync(outFile, rendered, 'utf8');
 
   console.log(`✅ 已生成注入你专属 COS 地址的 EdgeOne 边缘函数代码:`);
