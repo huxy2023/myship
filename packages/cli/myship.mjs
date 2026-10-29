@@ -37,6 +37,9 @@ import {
   saveMyShipFileConfig,
   loadTencentCredentials,
   MYSHIP_CONFIG_PATH,
+  MYSHIP_GLOBAL_EDGE_FN_PATH,
+  probeEdgeGateway,
+  deployEdgeFunctionToTeo,
 } from './cos-client.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -767,7 +770,7 @@ export async function listRemoteState({ projectFilter = null, showAll = false } 
 // ============================================================================
 // 3. 边缘函数代码生成器 (`myship build-edge-fn`) 与交互式登录 (`myship login`)
 // ============================================================================
-export function generateEdgeFunctionCode({ cosOrigin, outputPath } = {}) {
+export function generateEdgeFunctionCode({ cosOrigin, outputPath, silent = false } = {}) {
   const effective = getEffectiveEndpoints();
   const targetCosOrigin = (cosOrigin || effective.cosOrigin || '').replace(/\/$/, '');
   if (!targetCosOrigin) {
@@ -780,23 +783,60 @@ export function generateEdgeFunctionCode({ cosOrigin, outputPath } = {}) {
   const templateContent = readFileSync(templatePath, 'utf8');
   const rendered = templateContent.replace(/__MYSHIP_COS_ORIGIN__/g, targetCosOrigin);
 
-  const outFile = outputPath || resolve(process.cwd(), '.myship', 'edgeone-function.dist.js');
+  // 全局边缘函数属于用户云底座全局设施（1 个云函数服务全部项目），默认存放在 ~/.myship/edgeone-function.dist.js，绝不污染具体业务项目目录
+  const outFile = outputPath ? resolve(outputPath) : MYSHIP_GLOBAL_EDGE_FN_PATH;
   mkdirSync(dirname(outFile), { recursive: true });
-  if (basename(dirname(outFile)) === '.myship') {
+  if (basename(dirname(outFile)) === '.myship' && dirname(outFile) !== dirname(MYSHIP_CONFIG_PATH)) {
     ensureMyShipGitignore(dirname(outFile));
   }
   writeFileSync(outFile, rendered, 'utf8');
 
-  console.log(`✅ 已生成注入你专属 COS 地址的 EdgeOne 边缘函数代码:`);
-  console.log(`   📄 文件路径: ${outFile}`);
-  console.log(`   ☁️  绑定 COS: ${targetCosOrigin}`);
-  console.log(`\n👉 下一步 (二选一部署至腾讯云 EdgeOne):`);
-  console.log(`   方式 A (控制台粘贴): 复制 ${outFile} 的内容粘贴到 EdgeOne 站点【边缘函数】中并配置触发规则。`);
-  console.log(`   方式 B (tccli 命令):`);
-  console.log(
-    `   tccli teo ModifyFunction --ZoneId "zone-xxxxxxxx" --FunctionId "ef-xxxxxxxx" --Content "$(cat ${outFile})"`
-  );
-  return { outFile, targetCosOrigin };
+  if (!silent) {
+    console.log(`✅ 已生成全局 EdgeOne 边缘函数代码 (全账号仅需 1 个函数，所有项目共享):`);
+    console.log(`   📄 全局路径: ${outFile}`);
+    console.log(`   ☁️  绑定 COS: ${targetCosOrigin}`);
+  }
+  return { outFile, targetCosOrigin, code: rendered };
+}
+
+async function promptAndDeployEdgeFunction({ cosOrigin, remoteDomain, rlExternal = null } = {}) {
+  const { outFile, code } = generateEdgeFunctionCode({ cosOrigin, silent: false });
+  const effective = getEffectiveEndpoints();
+  const domain = remoteDomain || effective.remoteDomain || 'ship.example.com';
+
+  const rl = rlExternal || createInterface({ input: process.stdin, output: process.stdout });
+  const ans = (
+    await rl.question(
+      `\n👉 是否现在直接将该全局边缘函数自动上传并部署到腾讯云 EdgeOne？[Y/n (直接回车立即上传)]: `
+    )
+  )
+    .trim()
+    .toLowerCase();
+  if (!rlExternal) {
+    rl.close();
+  }
+
+  if (!ans || ans === 'y' || ans === 'yes') {
+    try {
+      console.log('☁️  正在通过腾讯云 EdgeOne API 自动匹配站点并上传边缘函数...');
+      const res = await deployEdgeFunctionToTeo({ code, remoteDomain: domain });
+      console.log(
+        `🎉 全局边缘函数自动部署成功！[${res.actionTaken === 'created' ? '新建' : '更新'}] 站点: ${
+          res.zoneName
+        } (${res.zoneId}) -> 函数 ID: ${res.functionId}`
+      );
+      return res;
+    } catch (err) {
+      console.log(`\n⚠️  自动上传边缘函数未完成: ${err.message}`);
+      console.log(`   💡 提示：若你当前使用的是仅含 COS 最小权限的子账号密钥，可任选以下方式完成首次边缘函数部署：`);
+      console.log(`   • 方式 A (控制台粘贴 1 次即可)：复制 ${outFile} 内容粘贴至 EdgeOne 控制台【边缘函数】`);
+      console.log(`   • 方式 B (临时用 tccli 扫码权限上传)：运行 tccli auth login 后再次执行 myship setup-edge`);
+      return null;
+    }
+  } else {
+    console.log(`\n💡 你随时可以运行 \`myship setup-edge\` 自动上传，或手动将 ${outFile} 粘贴至 EdgeOne 控制台。`);
+    return null;
+  }
 }
 
 async function interactiveLogin() {
@@ -881,7 +921,6 @@ async function interactiveLogin() {
   const remoteDomainInput = (
     await rl.question(`4. 你的泛域名后缀 [默认: ${domainDefault}]: `)
   ).trim();
-  rl.close();
 
   const patch = {
     cosOrigin: (cosOriginInput || cosDefault).replace(/\/$/, ''),
@@ -895,8 +934,27 @@ async function interactiveLogin() {
   saveMyShipFileConfig(patch);
   loadTencentCredentials();
   await cosListKeys('manifests/');
-  console.log(`\n✅ 认证与连通性校验成功！配置已写入: ${MYSHIP_CONFIG_PATH}`);
-  generateEdgeFunctionCode({ cosOrigin: patch.cosOrigin });
+  console.log(`\n✅ COS 认证与连通性校验成功！全局配置已写入: ${MYSHIP_CONFIG_PATH}`);
+
+  // 自动生成全局备份至 ~/.myship/edgeone-function.dist.js（绝不写入当前业务项目目录）
+  generateEdgeFunctionCode({ cosOrigin: patch.cosOrigin, silent: true });
+
+  // 自动探测云端全局 EdgeOne 泛域名网关是否已在线运行
+  const probe = await probeEdgeGateway(patch.remoteDomain);
+  if (probe.online) {
+    rl.close();
+    console.log(`🌐 云端全局边缘网关检测通过: https://*.${patch.remoteDomain} 已在线运行！`);
+    console.log(`   (全局边缘函数全账号仅需部署 1 次，所有项目共享，当前电脑无需重复操作边缘函数)`);
+    console.log(`🚀 配置全部完成！现在在任意前端项目下直接输入 \`myship\` 即可秒级发布！`);
+  } else {
+    console.log(`\n💡 尚未在 https://*.${patch.remoteDomain} 探测到边缘网关响应（若是首次从 0 搭建云底座，需部署 1 次全局边缘函数）。`);
+    await promptAndDeployEdgeFunction({
+      cosOrigin: patch.cosOrigin,
+      remoteDomain: patch.remoteDomain,
+      rlExternal: rl,
+    });
+    rl.close();
+  }
 }
 
 function printWhoami() {
@@ -1031,8 +1089,12 @@ if (isMainModule) {
       printWhoami();
       return;
     }
-    if (first === 'build-edge-fn') {
-      generateEdgeFunctionCode({ outputPath: positional[1] });
+    if (first === 'build-edge-fn' || first === 'setup-edge') {
+      if (first === 'setup-edge' || (process.stdin.isTTY && !positional[1])) {
+        await promptAndDeployEdgeFunction();
+      } else {
+        generateEdgeFunctionCode({ outputPath: positional[1] });
+      }
       return;
     }
     if (first === 'init') {

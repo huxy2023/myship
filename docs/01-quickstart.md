@@ -51,8 +51,10 @@ myship login
 3. **填入云底座地址**：
    - **你的 COS 存储桶地址**（例如：`https://myship-1250000000.cos.ap-guangzhou.myqcloud.com`）
    - **你的泛域名后缀**（例如：`ship.example.com`）
-
-配置将加密保存在 `~/.myship/config.json`（文件权限 `0600`），并自动在 `.myship/edgeone-function.dist.js` 生成注入了你 COS 地址的边缘函数代码。
+4. **全局边缘网关智能探测与一键上传**：
+   - **全账号共享 1 个云函数**：EdgeOne 边缘函数是全局路由底座，所有前端项目共享同一个云函数，无需为每个项目单独创建。
+   - **换新电脑免重复操作**：`myship login` 会自动探测 `https://_myship_probe.<你的泛域名后缀>`。如果云端边缘网关已在线运行，直接提示就绪结束，**绝不在当前业务项目文件夹下生成任何边缘函数文件**（全局函数文件统一存放在 `~/.myship/edgeone-function.dist.js`）。
+   - **首次搭建敲回车直传**：若探测到云端尚未部署边缘函数，终端会提示 `是否现在直接将该全局边缘函数自动上传并部署到腾讯云 EdgeOne？[Y/n]`，直接敲回车即可通过内置 EdgeOne API 自动完成上传！
 
 ### 3. 巡检当前身份与项目上下文 (`myship whoami`)
 

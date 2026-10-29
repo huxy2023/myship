@@ -71,13 +71,16 @@ myship login
 - **方式一（CAM 子账号最小权限密钥，跨电脑零依赖）**：前往 [腾讯云 CAM 用户控制台](https://console.cloud.tencent.com/cam/user) 新建编程访问子账号，**日常发包/切流/回滚仅需授予 1 项最小权限：`QcloudCOSDataFullControl`（对象存储 COS 数据读写权限）**。
 - **方式二（`tccli` 浏览器扫码免静态密钥）**：选择 `[2]` 直接唤起 `tccli auth login` 扫码授权（或自动检测并一键复用本机已有的 `~/.tccli/default.credential`，支持 OAuth 自动续期）。
 - 随后填入你的 **COS 存储桶地址**（如 `https://myship-1250000000.cos.ap-guangzhou.myqcloud.com`）与 **泛域名后缀**（如 `ship.example.com`）。
+- **全局边缘函数智能检测与一键回车上传**：
+  - `myship login` 会自动探测你的云端泛域名网关是否已在线：若你是在**第二台电脑登录**（云端网关已在线），会自动跳过边缘函数部署，且**绝不在你的业务项目目录内生成任何边缘函数文件**（全局备份统一保存在 `~/.myship/edgeone-function.dist.js`）。
+  - 若你是**首次搭建云底座**，只需在终端按一下回车（`[Y/n]`），`myship` 会自动调用腾讯云 EdgeOne API 匹配站点并将全局边缘函数 `myship-cas-router` 上传生效！
 
-### 第 3 步：一键生成你的专属 EdgeOne 边缘函数代码
+### 第 3 步：（可选）随时一键更新云端全局边缘函数
 
 ```bash
-myship build-edge-fn
+myship setup-edge
 ```
-该命令会自动将你的 COS 存储桶地址注入边缘网关模板，生成 `.myship/edgeone-function.dist.js` 并输出一键部署命令。  
+全账号所有前端项目共享 **1 个**云端边缘函数。若日后修改了存储桶地址，运行 `myship setup-edge` 敲回车即可一键同步至 EdgeOne。  
 *(详细的 DNSPod 泛解析、EdgeOne 免费泛域名 HTTPS 证书申请与避坑指南，请阅读 👉 **[《从 0 到 1 自建云端底座保姆级指南》](./docs/02-self-hosting-guide.md)**)*。
 
 ### 第 4 步：在任意前端项目中享受 6 个字母的极简发布

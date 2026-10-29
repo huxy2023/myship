@@ -15,6 +15,11 @@ import { homedir } from 'node:os';
 import { resolve, dirname } from 'node:path';
 
 export const MYSHIP_CONFIG_PATH = resolve(homedir(), '.myship', 'config.json');
+export const MYSHIP_GLOBAL_EDGE_FN_PATH = resolve(
+  homedir(),
+  '.myship',
+  'edgeone-function.dist.js'
+);
 export const TCCLI_CRED_PATH = resolve(homedir(), '.tccli', 'default.credential');
 
 export function loadMyShipFileConfig() {
@@ -253,4 +258,185 @@ export async function cosListKeys(prefix = '', customOrigin) {
     }
   }
   return keys;
+}
+
+// ============================================================================
+// 腾讯云 EdgeOne (TEO) 原生 API v3 (TC3-HMAC-SHA256) 客户端与全局网关探测
+// ============================================================================
+function sha256HexStr(str) {
+  return createHash('sha256').update(str, 'utf8').digest('hex');
+}
+
+function hmacSha256Buf(key, msg) {
+  return createHmac('sha256', key).update(msg, 'utf8').digest();
+}
+
+function hmacSha256Hex(key, msg) {
+  return createHmac('sha256', key).update(msg, 'utf8').digest('hex');
+}
+
+export async function probeEdgeGateway(remoteDomain) {
+  if (!remoteDomain) return { online: false };
+  const cleanDomain = remoteDomain.replace(/^\*\./, '');
+  const probeUrl = `https://_myship_probe.${cleanDomain}/`;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4000);
+    const res = await fetch(probeUrl, {
+      method: 'GET',
+      signal: controller.signal,
+      headers: { Accept: 'application/json, text/html' },
+    });
+    clearTimeout(timer);
+    const hasHeader = Boolean(
+      res.headers.get('x-myship-subdomain') || res.headers.get('x-myship-engine')
+    );
+    const text = await res.text();
+    const isMyShipBody =
+      text.includes('DEPLOYMENT_ALIAS_NOT_FOUND') ||
+      text.includes('MyShip') ||
+      text.includes('aliases/_myship_probe.json');
+    return {
+      online: hasHeader || isMyShipBody,
+      status: res.status,
+      probeUrl,
+    };
+  } catch {
+    return { online: false, probeUrl };
+  }
+}
+
+export async function teoRequest(action, payload = {}) {
+  const { secretId, secretKey, token } = loadTencentCredentials();
+  const service = 'teo';
+  const host = 'teo.tencentcloudapi.com';
+  const version = '2022-09-01';
+  const timestamp = Math.floor(Date.now() / 1000);
+  const date = new Date(timestamp * 1000).toISOString().slice(0, 10);
+
+  const bodyStr = JSON.stringify(payload);
+  const contentType = 'application/json; charset=utf-8';
+  const canonicalHeaders = `content-type:${contentType}\nhost:${host}\nx-tc-action:${action.toLowerCase()}\n`;
+  const signedHeaders = 'content-type;host;x-tc-action';
+  const canonicalRequest = [
+    'POST',
+    '/',
+    '',
+    canonicalHeaders,
+    signedHeaders,
+    sha256HexStr(bodyStr),
+  ].join('\n');
+
+  const credentialScope = `${date}/${service}/tc3_request`;
+  const stringToSign = [
+    'TC3-HMAC-SHA256',
+    String(timestamp),
+    credentialScope,
+    sha256HexStr(canonicalRequest),
+  ].join('\n');
+
+  const secretDate = hmacSha256Buf(`TC3${secretKey}`, date);
+  const secretService = hmacSha256Buf(secretDate, service);
+  const secretSigning = hmacSha256Buf(secretService, 'tc3_request');
+  const signature = hmacSha256Hex(secretSigning, stringToSign);
+
+  const authorization = `TC3-HMAC-SHA256 Credential=${secretId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+
+  const headers = {
+    Authorization: authorization,
+    'Content-Type': contentType,
+    Host: host,
+    'X-TC-Action': action,
+    'X-TC-Version': version,
+    'X-TC-Timestamp': String(timestamp),
+  };
+  if (token) {
+    headers['X-TC-Token'] = token;
+  }
+
+  const res = await fetch(`https://${host}/`, {
+    method: 'POST',
+    headers,
+    body: bodyStr,
+  });
+  const data = await res.json();
+  if (data.Response && data.Response.Error) {
+    const err = new Error(
+      `EdgeOne API [${action}] 失败 (${data.Response.Error.Code}): ${data.Response.Error.Message}`
+    );
+    err.code = data.Response.Error.Code;
+    throw err;
+  }
+  return data.Response;
+}
+
+export async function deployEdgeFunctionToTeo({ code, remoteDomain }) {
+  const cleanDomain = (remoteDomain || '').replace(/^\*\./, '');
+  const parts = cleanDomain.split('.');
+  const rootDomainGuess = parts.length >= 2 ? parts.slice(-2).join('.') : cleanDomain;
+
+  // 1. 自动查找站点 ZoneId
+  const zonesResp = await teoRequest('DescribeZones', {});
+  const zones = zonesResp.Zones || [];
+  if (zones.length === 0) {
+    throw new Error('当前腾讯云账号下未找到任何 EdgeOne 站点 (Zone)，请先在控制台添加站点。');
+  }
+
+  let matchedZone =
+    zones.find((z) => z.ZoneName === rootDomainGuess || cleanDomain.endsWith(z.ZoneName)) ||
+    zones[0];
+  const zoneId = matchedZone.ZoneId;
+  const zoneName = matchedZone.ZoneName;
+
+  // 2. 查询该站点下是否已有 myship-cas-router 边缘函数
+  const fnResp = await teoRequest('DescribeFunctions', { ZoneId: zoneId });
+  const functions = fnResp.Functions || [];
+  let targetFn = functions.find((f) => f.Name === 'myship-cas-router') || functions[0] || null;
+  let functionId = null;
+  let actionTaken = '';
+
+  if (targetFn) {
+    functionId = targetFn.FunctionId;
+    await teoRequest('ModifyFunction', {
+      ZoneId: zoneId,
+      FunctionId: functionId,
+      Content: code,
+      Remark: 'MyShip Global CAS Wildcard Router (Managed by @myship/cli)',
+    });
+    actionTaken = 'updated';
+  } else {
+    const createResp = await teoRequest('CreateFunction', {
+      ZoneId: zoneId,
+      Name: 'myship-cas-router',
+      Content: code,
+      Remark: 'MyShip Global CAS Wildcard Router (Managed by @myship/cli)',
+    });
+    functionId = createResp.FunctionId;
+    actionTaken = 'created';
+
+    // 尝试自动创建触发规则
+    try {
+      await teoRequest('CreateFunctionRule', {
+        ZoneId: zoneId,
+        FunctionId: functionId,
+        Remark: `MyShip wildcard route for *.${cleanDomain}`,
+        FunctionRuleConditions: [
+          {
+            RuleConditions: [
+              {
+                Operator: 'equal',
+                Target: 'host',
+                Values: [`*.${cleanDomain}`, cleanDomain],
+              },
+            ],
+          },
+        ],
+      });
+    } catch {
+      // 若规则已存在或使用规则引擎绑定则忽略
+    }
+  }
+
+  saveMyShipFileConfig({ zoneId, functionId });
+  return { zoneId, zoneName, functionId, actionTaken };
 }
