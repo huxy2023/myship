@@ -26,7 +26,7 @@
     "url": "https://github.com/huxy2023/myship/issues"
   },
   "bin": {
-    "myship": "./packages/cli/myship.mjs"
+    "myship": "packages/cli/myship.mjs"
   },
   "files": [
     "packages/cli/myship.mjs",
