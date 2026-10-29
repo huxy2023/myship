@@ -1,0 +1,12 @@
+{
+  "name": "@myship/cas-sandbox",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "MyShip local offline CAS sandbox test & cloud multi-version demo",
+  "scripts": {
+    "test:local": "node demo-run.mjs",
+    "demo:cloud": "node cloud-demo-run.mjs"
+  }
+}

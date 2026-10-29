@@ -1,0 +1,15 @@
+{
+  "name": "@myship/site",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "MyShip Open-Source Portal & Clarify-style Documentation Generator",
+  "scripts": {
+    "build": "node build-site.mjs",
+    "ship": "node build-site.mjs && node ../../packages/cli/myship.mjs ./dist -p myship --raw -d myship"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

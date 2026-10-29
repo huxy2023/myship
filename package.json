@@ -1,0 +1,28 @@
+{
+  "name": "myship",
+  "version": "1.0.0",
+  "license": "MIT",
+  "type": "module",
+  "description": "Self-hosted, zero-dependency CAS deployment engine & wildcard router (surge.sh + Vercel on your own EdgeOne & COS)",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/huxy2023/myship.git"
+  },
+  "bin": {
+    "myship": "./packages/cli/myship.mjs"
+  },
+  "scripts": {
+    "demo": "pnpm --filter @myship/cas-sandbox test:local",
+    "demo:cloud": "pnpm --filter @myship/cas-sandbox demo:cloud",
+    "build:site": "pnpm --filter @myship/site build",
+    "ship": "node packages/cli/myship.mjs",
+    "ship:ls": "node packages/cli/myship.mjs ls",
+    "ship:all": "node packages/cli/myship.mjs ls --all",
+    "ship:rollback": "node packages/cli/myship.mjs rollback",
+    "ship:site": "pnpm --filter @myship/site ship",
+    "gateway:local": "pnpm --filter @myship/edge-gateway dev"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

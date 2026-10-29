@@ -1,0 +1,21 @@
+{
+  "name": "@myship/cli",
+  "version": "1.0.0",
+  "license": "MIT",
+  "type": "module",
+  "description": "MyShip — Zero-dependency CAS deployment & wildcard routing CLI",
+  "bin": {
+    "myship": "./myship.mjs"
+  },
+  "files": [
+    "myship.mjs",
+    "cos-client.mjs"
+  ],
+  "scripts": {
+    "start": "node myship.mjs",
+    "ls": "node myship.mjs ls"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

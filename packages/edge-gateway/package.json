@@ -1,0 +1,13 @@
+{
+  "name": "@myship/edge-gateway",
+  "version": "1.0.0",
+  "license": "MIT",
+  "type": "module",
+  "description": "MyShip wildcard dynamic Host edge router (EdgeOne Edge Function template + local simulator)",
+  "scripts": {
+    "dev": "node local-gateway.mjs"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
