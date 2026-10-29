@@ -355,7 +355,7 @@ ${parsedDocs.map((d) => `- [${d.title}](https://myship.ship.onehub.top${d.rawPat
 
 ## 快速命令速查 (Quick CLI Reference)
 
-- 全局安装: \`npm i -g github:huxy2023/myship\`
+- 全局安装: \`npm i -g @myship/cli\`
 - 交互式登录与绑定自有云底座: \`myship login\`
 - 生成专属 EdgeOne 边缘函数代码: \`myship build-edge-fn\`
 - 零参数智能发布 (自动识别 .myship/project.json): \`myship\`
@@ -953,7 +953,7 @@ function generateSiteHtml(parsedDocs, searchEntries, mcpConfig) {
             </button>
           </div>
           <div class="quick-install-bar">
-            <span>$ npm i -g myship &amp;&amp; myship login</span>
+            <span>$ npm i -g @myship/cli &amp;&amp; myship login</span>
             <button type="button" id="hero-copy-cmd" title="复制安装命令">📋</button>
           </div>
         </div>
@@ -1320,7 +1320,7 @@ function generateSiteHtml(parsedDocs, searchEntries, mcpConfig) {
     });
 
     document.getElementById('hero-copy-cmd').addEventListener('click', () => {
-      copyText('npm i -g myship && myship login', '✅ 已复制安装与登录命令');
+      copyText('npm i -g @myship/cli && myship login', '✅ 已复制安装与登录命令');
     });
 
     document.querySelectorAll('[data-copy-target]').forEach(btn => {

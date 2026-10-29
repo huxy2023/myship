@@ -27,7 +27,7 @@
 
 ```bash
 # 方式 A：直接从 NPM 官方源全局安装（推荐，国内镜像毫秒级同步，0 外部依赖）
-npm i -g myship
+npm i -g @myship/cli
 
 # 方式 B：直接从 GitHub 仓库安装最新开发版
 npm i -g github:huxy2023/myship
