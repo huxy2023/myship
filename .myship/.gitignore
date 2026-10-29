@@ -1,0 +1,4 @@
+# Automatically created by MyShip CLI to prevent accidental leaks
+*
+!project.json
+!.gitignore

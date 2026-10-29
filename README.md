@@ -67,10 +67,10 @@ myship --version
 ```bash
 myship login
 ```
-交互式输入你的：
-- 腾讯云 `SecretId` / `SecretKey`（若本机已安装并登录过 `tccli`，可直接回车自动复用 `~/.tccli/default.credential`）
-- 你的 COS 存储桶地址（如 `https://myship-1250000000.cos.ap-guangzhou.myqcloud.com`）
-- 你的泛域名后缀（如 `ship.example.com`）
+向导提供两种安全的认证方式任选其一：
+- **方式一（CAM 子账号最小权限密钥，跨电脑零依赖）**：前往 [腾讯云 CAM 用户控制台](https://console.cloud.tencent.com/cam/user) 新建编程访问子账号，**日常发包/切流/回滚仅需授予 1 项最小权限：`QcloudCOSDataFullControl`（对象存储 COS 数据读写权限）**。
+- **方式二（`tccli` 浏览器扫码免静态密钥）**：选择 `[2]` 直接唤起 `tccli auth login` 扫码授权（或自动检测并一键复用本机已有的 `~/.tccli/default.credential`，支持 OAuth 自动续期）。
+- 随后填入你的 **COS 存储桶地址**（如 `https://myship-1250000000.cos.ap-guangzhou.myqcloud.com`）与 **泛域名后缀**（如 `ship.example.com`）。
 
 ### 第 3 步：一键生成你的专属 EdgeOne 边缘函数代码
 

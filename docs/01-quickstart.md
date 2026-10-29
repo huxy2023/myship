@@ -41,10 +41,16 @@ npm i -g github:huxy2023/myship
 myship login
 ```
 
-按终端提示依次输入：
-1. **腾讯云 `SecretId` & `SecretKey`**（若本机已安装并登录过 `tccli`，可直接回车自动复用 `~/.tccli/default.credential`）
-2. **你的 COS 存储桶地址**（例如：`https://myship-1250000000.cos.ap-guangzhou.myqcloud.com`）
-3. **你的泛域名后缀**（例如：`ship.example.com`）
+向导会自动检测本机是否已有可用凭证，并提供两种安全认证方式供选择：
+
+1. **方式一：CAM 子账号最小权限 API 密钥（跨电脑零依赖，推荐）**
+   - **最小权限原则**：`MyShip` 日常执行 `deploy / alias / rollback / ls` 时**仅读写 COS 对象存储**，完全不触碰其他云资源。
+   - 前往 [腾讯云访问管理 (CAM) -> 用户列表](https://console.cloud.tencent.com/cam/user) 新建子用户（勾选“编程访问”），**仅需授予 1 项策略：`QcloudCOSDataFullControl`（对象存储 COS 数据读写权限）**，然后将生成的 `SecretId` 与 `SecretKey` 粘贴至终端。
+2. **方式二：使用腾讯云官方 `tccli` 浏览器扫码登录（免创建静态密钥）**
+   - 在 `myship login` 中输入 `2`，向导会自动唤起 `tccli auth login` 打开浏览器扫码登录，并自动复用与续期 `~/.tccli/default.credential` 中的临时 STS 凭证。
+3. **填入云底座地址**：
+   - **你的 COS 存储桶地址**（例如：`https://myship-1250000000.cos.ap-guangzhou.myqcloud.com`）
+   - **你的泛域名后缀**（例如：`ship.example.com`）
 
 配置将加密保存在 `~/.myship/config.json`（文件权限 `0600`），并自动在 `.myship/edgeone-function.dist.js` 生成注入了你 COS 地址的边缘函数代码。
 

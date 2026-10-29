@@ -13,6 +13,7 @@
  * 4. CAS 内容寻址去重 + 永久不可变快照 + 0 秒原子切流与回滚
  */
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import {
   mkdirSync,
   readdirSync,
@@ -807,14 +808,70 @@ async function interactiveLogin() {
   console.log('🔐 MyShip 跨设备认证与自有云底座 (BYOC) 配置向导');
   console.log('   配置文件将安全保存在 ~/.myship/config.json (权限 0600)');
   console.log('==============================================================');
+
+  let secretId = '';
+  let secretKey = '';
+  let reuseExistingCred = false;
+
   if (status.authenticated) {
-    console.log(`💡 检测到当前已有可用凭证: ${status.maskedSecretId} (来源: ${status.source})`);
+    console.log(`\n✅ 检测到本机已有可用凭证: ${status.maskedSecretId}`);
+    console.log(`   🔑 凭证来源: ${status.source}`);
+    const reuseAns = (
+      await rl.question('👉 是否直接复用该凭证（跳过密钥输入）？[Y/n]: ')
+    )
+      .trim()
+      .toLowerCase();
+    if (!reuseAns || reuseAns === 'y' || reuseAns === 'yes') {
+      reuseExistingCred = true;
+    }
   }
 
-  const secretId = (await rl.question('1. 请输入腾讯云 SecretId (直接回车则保持现有凭证): ')).trim();
-  const secretKey = (
-    await rl.question('2. 请输入腾讯云 SecretKey (直接回车则保持现有凭证): ')
-  ).trim();
+  if (!reuseExistingCred) {
+    console.log('\n--------------------------------------------------------------');
+    console.log('🔑 请选择腾讯云认证方式（二选一）：\n');
+    console.log('  [1] 方式一：使用 CAM 子账号 API 密钥 (跨电脑零依赖，推荐)');
+    console.log('      🛡️  最小权限安全指引：');
+    console.log('         • MyShip 日常发包/切流/回滚【仅读写 COS 对象存储】，不触碰其他云资源');
+    console.log('         • 前往腾讯云控制台【访问管理 CAM -> 用户 -> 新建子用户】：');
+    console.log('           https://console.cloud.tencent.com/cam/user');
+    console.log('         • 勾选“编程访问”，日常部署仅需授予 1 项最小权限策略：');
+    console.log('           👉 QcloudCOSDataFullControl (对象存储 COS 数据读写权限)\n');
+    console.log('  [2] 方式二：使用腾讯云官方 tccli 浏览器扫码登录 (免建静态密钥，自动续期)');
+    console.log('      💡 适合已安装 tccli (pip install tccli) 的电脑，扫码后 MyShip 自动复用');
+    console.log('--------------------------------------------------------------');
+
+    const modeAns = (await rl.question('请选择认证方式 [1/2，直接回车默认 1]: ')).trim();
+
+    if (modeAns === '2') {
+      const checkTccli = spawnSync('tccli', ['--version'], { stdio: 'ignore' });
+      if (checkTccli.status === 0) {
+        console.log('\n🌐 正在唤起 `tccli auth login` 浏览器扫码授权...');
+        rl.pause();
+        const loginRes = spawnSync('tccli', ['auth', 'login'], { stdio: 'inherit' });
+        rl.resume();
+        if (loginRes.status !== 0) {
+          rl.close();
+          throw new Error('tccli auth login 未完成，请重试或改选方式 [1] 输入密钥。');
+        }
+        console.log('✅ tccli 扫码登录成功！MyShip 将自动复用 ~/.tccli/default.credential。');
+      } else {
+        console.log('\n⚠️  未在本机检测到 `tccli` 命令。');
+        console.log('   • 如需使用扫码登录，请先执行: pip install tccli && tccli auth login');
+        console.log('   • 或现在直接切换为【方式 1】输入 CAM 子账号 SecretId / SecretKey：\n');
+        secretId = (await rl.question('1. 请输入腾讯云 SecretId: ')).trim();
+        secretKey = (await rl.question('2. 请输入腾讯云 SecretKey: ')).trim();
+      }
+    } else {
+      secretId = (
+        await rl.question('\n1. 请输入腾讯云 SecretId (仅需 QcloudCOSDataFullControl 权限): ')
+      ).trim();
+      secretKey = (await rl.question('2. 请输入腾讯云 SecretKey: ')).trim();
+    }
+  }
+
+  console.log('\n--------------------------------------------------------------');
+  console.log('☁️  配置你的自有云底座地址 (可在已配置电脑上运行 `myship whoami` 查看)');
+  console.log('--------------------------------------------------------------');
   const cosDefault =
     currentEndpoints.cosOrigin || 'https://myship-1250000000.cos.ap-guangzhou.myqcloud.com';
   const cosOriginInput = (
