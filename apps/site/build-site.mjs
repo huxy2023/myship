@@ -351,7 +351,7 @@ function buildAll() {
 
 ## 核心文档索引 (Documentation)
 
-${parsedDocs.map((d) => `- [${d.title}](${d.rawPath}): ${d.description}`).join('\n')}
+${parsedDocs.map((d) => `- [${d.title}](https://myship.ship.onehub.top${d.rawPath}): ${d.description}`).join('\n')}
 
 ## 快速命令速查 (Quick CLI Reference)
 
@@ -376,7 +376,7 @@ ${parsedDocs.map((d) => `- [${d.title}](${d.rawPath}): ${d.description}`).join('
   const mcpConfig = {
     mcpServers: {
       'myship-docs': {
-        url: '/llms.txt',
+        url: 'https://myship.ship.onehub.top/llms.txt',
         description: 'MyShip BYOC CAS Deployment Engine Documentation & Self-Hosting Guide',
       },
     },

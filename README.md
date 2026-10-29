@@ -6,7 +6,10 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20.0.0-339933.svg)](https://nodejs.org/)
 [![Dependencies](https://img.shields.io/badge/Dependencies-Zero-brightgreen.svg)](./packages/cli/package.json)
-[![Architecture](https://img.shields.io/badge/Architecture-BYOC%20%7C%20CAS-0284c7.svg)](./docs/03-architecture.md)
+[![Live Docs](https://img.shields.io/badge/Website%20%26%20Docs-myship.ship.onehub.top-0284c7.svg)](https://myship.ship.onehub.top)
+
+- 🌐 **官方在线门户与文档站 (由 MyShip 自举托管)**：[https://myship.ship.onehub.top](https://myship.ship.onehub.top)
+- 🤖 **AI / LLM 知识库索引 (`llms.txt`)**：[https://myship.ship.onehub.top/llms.txt](https://myship.ship.onehub.top/llms.txt) | [全量 Markdown (`llms-full.txt`)](https://myship.ship.onehub.top/llms-full.txt)
 
 ---
 

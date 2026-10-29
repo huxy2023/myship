@@ -1,59 +1,60 @@
 /**
- * cos-client.mjs — 零外部依赖的腾讯云 COS REST API 签名与上传客户端 (BYOC 开源版)
+ * cos-client.mjs — 零依赖腾讯云 COS 轻量级客户端 (BYOC 开源版)
  *
- * 凭证与云底座配置读取优先级（3 级自动兜底）：
- * 1. 环境变量 (适合 CI/CD):
- *    - 密钥: MYSHIP_SECRET_ID / MYSHIP_SECRET_KEY 或 TENCENTCLOUD_SECRET_ID / TENCENTCLOUD_SECRET_KEY
- *    - 端点: COS_ORIGIN / SHIP_REMOTE_DOMAIN
- * 2. MyShip 独立配置文件 (由 `myship login` 生成): ~/.myship/config.json
- * 3. 本机 tccli 凭证自动复用: ~/.tccli/default.credential
+ * 三级凭证与配置加载优先级 (跨电脑零依赖)：
+ *   1. 环境变量 (适合 CI/CD): MYSHIP_SECRET_ID / TENCENTCLOUD_SECRET_ID 等
+ *   2. MyShip 独立全局配置 (适合任意新电脑): ~/.myship/config.json (由 myship login 生成, 权限 0600)
+ *   3. 本机 tccli 凭证自动兜底: ~/.tccli/default.credential (由 tccli auth login 生成，自动支持 STS token)
+ *
+ * 安全红线：绝不在任何日志或输出中打印完整 SecretId / SecretKey。
  */
 import { createHash, createHmac } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { resolve, dirname } from 'node:path';
 
 export const MYSHIP_CONFIG_PATH = resolve(homedir(), '.myship', 'config.json');
 export const TCCLI_CRED_PATH = resolve(homedir(), '.tccli', 'default.credential');
 
 export function loadMyShipFileConfig() {
-  if (!existsSync(MYSHIP_CONFIG_PATH)) return null;
+  if (!existsSync(MYSHIP_CONFIG_PATH)) {
+    return {};
+  }
   try {
     return JSON.parse(readFileSync(MYSHIP_CONFIG_PATH, 'utf8'));
   } catch {
-    return null;
+    return {};
   }
 }
 
-export function saveMyShipFileConfig(config) {
-  const dir = dirname(MYSHIP_CONFIG_PATH);
-  mkdirSync(dir, { recursive: true });
-  const existing = loadMyShipFileConfig() || {};
+export function saveMyShipFileConfig(newConfig) {
+  const current = loadMyShipFileConfig();
   const merged = {
-    ...existing,
-    ...config,
+    ...current,
+    ...newConfig,
     updatedAt: new Date().toISOString(),
   };
+  mkdirSync(dirname(MYSHIP_CONFIG_PATH), { recursive: true });
   writeFileSync(MYSHIP_CONFIG_PATH, JSON.stringify(merged, null, 2), {
     encoding: 'utf8',
     mode: 0o600,
   });
+  try {
+    chmodSync(MYSHIP_CONFIG_PATH, 0o600);
+  } catch {
+    // Windows 忽略 chmod
+  }
   return merged;
 }
 
 export function getEffectiveEndpoints() {
   const fileCfg = loadMyShipFileConfig();
-  const cosOrigin = (
-    process.env.COS_ORIGIN ||
-    fileCfg?.cosOrigin ||
+  const cosOrigin = (process.env.COS_ORIGIN || fileCfg.cosOrigin || '').replace(/\/$/, '');
+  const remoteDomain = (process.env.SHIP_REMOTE_DOMAIN || fileCfg.remoteDomain || '').replace(
+    /^\*\./,
     ''
-  ).replace(/\/$/, '');
-  const remoteDomain = (
-    process.env.SHIP_REMOTE_DOMAIN ||
-    fileCfg?.remoteDomain ||
-    ''
-  ).replace(/^\*\./, '');
-
+  );
   return {
     cosOrigin: cosOrigin || null,
     remoteDomain: remoteDomain || null,
@@ -79,46 +80,62 @@ export function assertCloudEndpointsConfigured() {
   return { cosOrigin, remoteDomain };
 }
 
+function maskSecret(str) {
+  if (!str || str.length < 8) return '****';
+  return `${str.slice(0, 4)}****${str.slice(-4)}`;
+}
+
 export function loadTencentCredentials() {
-  // 1. 环境变量优先
+  // 1. 优先读取环境变量 (CI/CD)
   const envId = process.env.MYSHIP_SECRET_ID || process.env.TENCENTCLOUD_SECRET_ID;
   const envKey = process.env.MYSHIP_SECRET_KEY || process.env.TENCENTCLOUD_SECRET_KEY;
   if (envId && envKey) {
     return {
       secretId: envId,
       secretKey: envKey,
-      source: 'env (环境变量)',
+      token: process.env.MYSHIP_TOKEN || process.env.TENCENTCLOUD_TOKEN || '',
+      source: '环境变量 (ENV)',
     };
   }
 
-  // 2. ~/.myship/config.json 独立配置文件
+  // 2. 其次读取 ~/.myship/config.json (跨电脑独立登录配置)
   const fileCfg = loadMyShipFileConfig();
-  if (fileCfg?.secretId && fileCfg?.secretKey) {
+  if (fileCfg.secretId && fileCfg.secretKey) {
     return {
       secretId: fileCfg.secretId,
       secretKey: fileCfg.secretKey,
+      token: fileCfg.token || '',
       source: `~/.myship/config.json`,
     };
   }
 
-  // 3. ~/.tccli/default.credential 自动兜底
+  // 3. 自动兜底读取 ~/.tccli/default.credential (支持 OAuth 临时 Token 自动续期)
   if (existsSync(TCCLI_CRED_PATH)) {
-    try {
-      const raw = JSON.parse(readFileSync(TCCLI_CRED_PATH, 'utf8'));
-      if (raw.secretId && raw.secretKey) {
-        return {
-          secretId: raw.secretId,
-          secretKey: raw.secretKey,
-          source: `~/.tccli/default.credential (tccli 自动复用)`,
-        };
+    let raw = JSON.parse(readFileSync(TCCLI_CRED_PATH, 'utf8'));
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (raw.expiresAt && Number(raw.expiresAt) - 60 < nowSec) {
+      try {
+        execFileSync('tccli', ['sts', 'GetCallerIdentity'], { stdio: 'ignore' });
+        raw = JSON.parse(readFileSync(TCCLI_CRED_PATH, 'utf8'));
+      } catch {
+        // ignore if tccli is not in PATH
       }
-    } catch {
-      // ignore parse errors
+    }
+    const secretId = raw.secretId || raw.SecretId;
+    const secretKey = raw.secretKey || raw.SecretKey;
+    const token = raw.token || raw.Token || '';
+    if (secretId && secretKey) {
+      return {
+        secretId,
+        secretKey,
+        token,
+        source: `~/.tccli/default.credential (tccli 自动复用)`,
+      };
     }
   }
 
   throw new Error(
-    '未找到腾讯云凭证！请先执行 `myship login` 进行交互式配置（免安装 tccli），或设置环境变量 MYSHIP_SECRET_ID / MYSHIP_SECRET_KEY。'
+    '未检测到云端部署凭证！请先运行 `myship login` 配置密钥，或设置环境变量 MYSHIP_SECRET_ID / MYSHIP_SECRET_KEY。'
   );
 }
 
@@ -126,14 +143,10 @@ export function getAuthStatus() {
   const endpoints = getEffectiveEndpoints();
   try {
     const cred = loadTencentCredentials();
-    const maskedId =
-      cred.secretId.length > 8
-        ? `${cred.secretId.slice(0, 4)}****${cred.secretId.slice(-4)}`
-        : '****';
     return {
       authenticated: true,
-      maskedSecretId: maskedId,
       source: cred.source,
+      maskedSecretId: maskSecret(cred.secretId),
       ...endpoints,
     };
   } catch (err) {
@@ -145,115 +158,99 @@ export function getAuthStatus() {
   }
 }
 
-function sha1Hex(data) {
-  return createHash('sha1').update(data).digest('hex');
+function sha1Hex(str) {
+  return createHash('sha1').update(str).digest('hex');
 }
 
-function hmacSha1Hex(key, data) {
-  return createHmac('sha1', key).update(data).digest('hex');
+function hmacSha1Hex(key, str) {
+  return createHmac('sha1', key).update(str).digest('hex');
 }
 
-export function signCosRequest({ method, pathname, headers = {}, secretId, secretKey }) {
+export function signCosRequest(method, objectKey, customOrigin) {
+  const cosOrigin = customOrigin || assertCloudEndpointsConfigured().cosOrigin;
+  const { secretId, secretKey, token } = loadTencentCredentials();
+  const url = new URL(objectKey.startsWith('/') ? objectKey : `/${objectKey}`, cosOrigin);
+  const host = url.host;
+
   const now = Math.floor(Date.now() / 1000);
   const keyTime = `${now - 60};${now + 3600}`;
   const signKey = hmacSha1Hex(secretKey, keyTime);
 
-  const headerKeys = Object.keys(headers)
-    .map((k) => k.toLowerCase())
-    .sort();
-  const headerList = headerKeys.join(';');
-  const httpHeaders = headerKeys
-    .map((k) => {
-      const origKey = Object.keys(headers).find((ok) => ok.toLowerCase() === k);
-      return `${encodeURIComponent(k)}=${encodeURIComponent(String(headers[origKey]).trim())}`;
-    })
-    .join('&');
-
-  const httpString = `${method.toLowerCase()}\n${pathname}\n\n${httpHeaders}\n`;
+  const httpString = `${method.toLowerCase()}\n${url.pathname}\n\nhost=${encodeURIComponent(host).toLowerCase()}\n`;
   const stringToSign = `sha1\n${keyTime}\n${sha1Hex(httpString)}\n`;
   const signature = hmacSha1Hex(signKey, stringToSign);
 
-  return [
+  const authorization = [
     'q-sign-algorithm=sha1',
     `q-ak=${secretId}`,
     `q-sign-time=${keyTime}`,
     `q-key-time=${keyTime}`,
-    `q-header-list=${headerList}`,
+    'q-header-list=host',
     'q-url-param-list=',
     `q-signature=${signature}`,
   ].join('&');
+
+  const headers = {
+    Authorization: authorization,
+  };
+  if (token) {
+    headers['x-cos-security-token'] = token;
+  }
+  return { url: url.toString(), headers };
 }
 
-export async function cosHeadObject(key, customOrigin) {
-  const origin = customOrigin || assertCloudEndpointsConfigured().cosOrigin;
-  const { secretId, secretKey } = loadTencentCredentials();
-  const url = new URL(`${origin}/${key.replace(/^\//, '')}`);
-  const headers = { Host: url.host };
-  headers.Authorization = signCosRequest({
-    method: 'HEAD',
-    pathname: url.pathname,
-    headers,
-    secretId,
-    secretKey,
-  });
-
+export async function cosHeadObject(objectKey, customOrigin) {
+  const { url, headers } = signCosRequest('HEAD', objectKey, customOrigin);
   const res = await fetch(url, { method: 'HEAD', headers });
   return res.status === 200;
 }
 
-export async function cosPutObject(key, body, contentType = 'application/octet-stream', customOrigin) {
-  const origin = customOrigin || assertCloudEndpointsConfigured().cosOrigin;
-  const { secretId, secretKey } = loadTencentCredentials();
-  const url = new URL(`${origin}/${key.replace(/^\//, '')}`);
-  const buf = Buffer.isBuffer(body) ? body : Buffer.from(body);
+export async function cosPutObject(
+  objectKey,
+  body,
+  contentType = 'application/octet-stream',
+  customOrigin
+) {
+  const { url, headers } = signCosRequest('PUT', objectKey, customOrigin);
+  headers['Content-Type'] = contentType;
+  headers['x-cos-acl'] = 'public-read';
 
-  const headers = {
-    Host: url.host,
-    'Content-Type': contentType,
-    'Content-Length': String(buf.length),
-    'x-cos-acl': 'public-read',
-  };
-  headers.Authorization = signCosRequest({
+  const res = await fetch(url, {
     method: 'PUT',
-    pathname: url.pathname,
     headers,
-    secretId,
-    secretKey,
+    body,
   });
 
-  const res = await fetch(url, { method: 'PUT', headers, body: buf });
   if (!res.ok) {
     const errText = await res.text();
-    throw new Error(`COS PUT ${key} 失败 (${res.status}): ${errText}`);
+    throw new Error(`COS PUT 失败 (${res.status}) [${objectKey}]: ${errText.slice(0, 300)}`);
   }
   return true;
 }
 
-export async function cosGetJson(key, customOrigin) {
-  const origin = customOrigin || assertCloudEndpointsConfigured().cosOrigin;
-  const url = new URL(`${origin}/${key.replace(/^\//, '')}?t=${Date.now()}`);
-  const res = await fetch(url);
-  if (res.status === 404) return null;
-  if (!res.ok) throw new Error(`COS GET ${key} 失败 (${res.status})`);
+export async function cosGetJson(objectKey, customOrigin) {
+  const { url, headers } = signCosRequest('GET', objectKey, customOrigin);
+  const res = await fetch(url, { method: 'GET', headers });
+  if (!res.ok) {
+    return null;
+  }
   return res.json();
 }
 
 export async function cosListKeys(prefix = '', customOrigin) {
-  const origin = customOrigin || assertCloudEndpointsConfigured().cosOrigin;
-  const { secretId, secretKey } = loadTencentCredentials();
-  const url = new URL(`${origin}/?prefix=${encodeURIComponent(prefix)}&max-keys=1000`);
-  const headers = { Host: url.host };
-  headers.Authorization = signCosRequest({
-    method: 'GET',
-    pathname: '/',
-    headers,
-    secretId,
-    secretKey,
-  });
-
+  const { url, headers } = signCosRequest('GET', '/', customOrigin);
   const res = await fetch(url, { method: 'GET', headers });
-  if (!res.ok) return [];
+  if (!res.ok) {
+    throw new Error(`COS ListBucket 失败 (${res.status})`);
+  }
   const xml = await res.text();
-  const matches = [...xml.matchAll(/<Key>([^<]+)<\/Key>/g)];
-  return matches.map((m) => m[1]);
+  const keys = [];
+  const regex = /<Key>([^<]+)<\/Key>/g;
+  let match;
+  while ((match = regex.exec(xml)) !== null) {
+    if (!prefix || match[1].startsWith(prefix)) {
+      keys.push(match[1]);
+    }
+  }
+  return keys;
 }
