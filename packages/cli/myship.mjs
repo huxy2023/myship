@@ -958,7 +958,7 @@ if (isMainModule) {
         const rootPkg = JSON.parse(readFileSync(resolve(__dirname, '../../package.json'), 'utf8'));
         console.log(`myship v${rootPkg.version}`);
       } catch {
-        console.log('myship v1.0.0');
+        console.log('myship v0.1.0');
       }
       return;
     }
