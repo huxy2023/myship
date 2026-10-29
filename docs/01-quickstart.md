@@ -26,11 +26,11 @@
 在任何安装了 Node.js (`>=20.0.0`) 的电脑上：
 
 ```bash
-# 方式 A：直接从 NPM 官方源全局安装（推荐，国内镜像毫秒级同步，0 外部依赖）
+# 方式 A：直接从 NPM 官方源全局安装（推荐，0 外部依赖）
 npm i -g @myship/cli
 
-# 方式 B：直接从 GitHub 仓库安装最新开发版
-npm i -g github:huxy2023/myship
+# 方式 B：直接下载 GitHub Release 最新安装包到本地安装 (兼容 npm 12 安全策略)
+curl -fL https://github.com/huxy2023/myship/releases/download/v0.1.1/myship-cli-0.1.1.tgz -o /tmp/myship.tgz && npm i -g /tmp/myship.tgz
 ```
 
 ### 2. 绑定你的自有云底座 (`myship login`)
@@ -41,12 +41,20 @@ npm i -g github:huxy2023/myship
 myship login
 ```
 
-按终端提示依次输入：
-1. **腾讯云 `SecretId` & `SecretKey`**（若本机已安装并登录过 `tccli`，可直接回车自动复用 `~/.tccli/default.credential`）
-2. **你的 COS 存储桶地址**（例如：`https://myship-1250000000.cos.ap-guangzhou.myqcloud.com`）
-3. **你的泛域名后缀**（例如：`ship.example.com`）
+向导会自动检测本机是否已有可用凭证，并提供两种安全认证方式供选择：
 
-配置将加密保存在 `~/.myship/config.json`（文件权限 `0600`），并自动在 `.myship/edgeone-function.dist.js` 生成注入了你 COS 地址的边缘函数代码。
+1. **方式一：CAM 子账号最小权限 API 密钥（跨电脑零依赖，推荐）**
+   - **最小权限原则**：`MyShip` 日常执行 `deploy / alias / rollback / ls` 时**仅读写 COS 对象存储**，完全不触碰其他云资源。
+   - 前往 [腾讯云访问管理 (CAM) -> 用户列表](https://console.cloud.tencent.com/cam/user) 新建子用户（勾选“编程访问”），**仅需授予 1 项策略：`QcloudCOSDataFullControl`（对象存储 COS 数据读写权限）**，然后将生成的 `SecretId` 与 `SecretKey` 粘贴至终端。
+2. **方式二：使用腾讯云官方 `tccli` 浏览器扫码登录（免创建静态密钥）**
+   - 在 `myship login` 中输入 `2`，向导会自动唤起 `tccli auth login` 打开浏览器扫码登录，并自动复用与续期 `~/.tccli/default.credential` 中的临时 STS 凭证。
+3. **填入云底座地址**：
+   - **你的 COS 存储桶地址**（例如：`https://myship-1250000000.cos.ap-guangzhou.myqcloud.com`）
+   - **你的泛域名后缀**（例如：`ship.example.com`）
+4. **全局边缘网关智能探测与一键上传**：
+   - **全账号共享 1 个云函数**：EdgeOne 边缘函数是全局路由底座，所有前端项目共享同一个云函数，无需为每个项目单独创建。
+   - **换新电脑免重复操作**：`myship login` 会自动探测 `https://_myship_probe.<你的泛域名后缀>`。如果云端边缘网关已在线运行，直接提示就绪结束，**绝不在当前业务项目文件夹下生成任何边缘函数文件**（全局函数文件统一存放在 `~/.myship/edgeone-function.dist.js`）。
+   - **首次搭建敲回车直传**：若探测到云端尚未部署边缘函数，终端会提示 `是否现在直接将该全局边缘函数自动上传并部署到腾讯云 EdgeOne？[Y/n]`，直接敲回车即可通过内置 EdgeOne API 自动完成上传！
 
 ### 3. 巡检当前身份与项目上下文 (`myship whoami`)
 

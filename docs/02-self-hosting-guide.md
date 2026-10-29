@@ -56,20 +56,7 @@ flowchart TB
 
 ---
 
-### 第 2 步：在本机执行 `myship login` 并生成边缘函数代码
-
-在终端运行：
-
-```bash
-myship login
-```
-
-依次填入你的腾讯云 `SecretId`、`SecretKey`、刚才创建的 COS 域名以及 `ship.example.com`。
-登录成功后，终端会自动生成 **`.myship/edgeone-function.dist.js`**（也可随时运行 `myship build-edge-fn` 重新生成），里面已经自动注入了你的 COS 存储桶地址。
-
----
-
-### 第 3 步：在腾讯云 EdgeOne 标准站点接入泛域名与免费 HTTPS 证书
+### 第 2 步：在腾讯云 EdgeOne 标准站点接入泛域名与免费 HTTPS 证书
 
 1. 登录 [腾讯云 EdgeOne 控制台](https://console.cloud.tencent.com/edgeone/zones)，添加站点 `example.com`：
    - **套餐选择**：选择 **免费版（Free Plan）** 即可（免费版即支持泛域名加速与每月百万次边缘函数调用）。
@@ -86,19 +73,30 @@ myship login
 
 ---
 
-### 第 4 步：部署边缘函数网关并配置触发规则
+### 第 3 步：在本机执行 `myship login`，敲回车一键上传全局边缘函数
 
-1. 在 EdgeOne 站点控制台进入 **【边缘函数 (Edge Functions)】**，新建函数 `myship-cas-router`。
-2. 将第 2 步生成的 **`.myship/edgeone-function.dist.js`** 内容完整粘贴进去并保存发布（或使用 `tccli` 一键更新）：
-   ```bash
-   tccli teo ModifyFunction \
-     --ZoneId "zone-xxxxxxxx" \
-     --FunctionId "ef-xxxxxxxx" \
-     --Content "$(cat .myship/edgeone-function.dist.js)"
-   ```
-3. 在【边缘函数 -> 触发规则】中新建一条规则：
-   - **匹配条件**：`Host` 匹配 `*.ship.example.com`（或 `Host != example.com`）
-   - **执行动作**：执行边缘函数 `myship-cas-router`
+在终端运行：
+
+```bash
+myship login
+```
+
+1. **选择认证方式（二选一）**：
+   - **方式 `[1]` CAM 子账号密钥**：前往 [腾讯云 CAM 用户控制台](https://console.cloud.tencent.com/cam/user) 新建编程访问子账号。
+     - **日常发包最小权限**：仅需授予 **`QcloudCOSDataFullControl`**（对象存储 COS 数据读写权限）。
+     - **首次自动创建边缘函数权限（可选）**：若希望 CLI 自动帮你把边缘函数上传到 EdgeOne，可在首次配置时额外勾选 `QcloudTEOFullAccess`（或直接选用方式 `[2]` 扫码）。
+   - **方式 `[2]` `tccli` 浏览器扫码授权**：自动唤起 `tccli auth login` 扫码登录，免建静态密钥。
+2. **填入 COS 存储桶地址与泛域名后缀**（如 `ship.example.com`）。
+3. **全局边缘函数智能探测与一键上传**：
+   - **全账号共享 1 个云函数**：无论你有多少个前端项目、多少台电脑，云端永远只需要 **1 个全局边缘函数 (`myship-cas-router`)**。生成的全局函数代码统一保存在 **`~/.myship/edgeone-function.dist.js`**，绝不会在你的业务项目文件夹内产生任何冗余文件。
+   - **换新电脑自动跳过**：`myship login` 会自动探测 `https://_myship_probe.ship.example.com`。如果你是在第二台新电脑上登录，探测到云端网关已在线后会自动跳过边缘函数部署！
+   - **首次搭建敲回车直传**：首次搭建时，终端会提示：
+     ```text
+     👉 是否现在直接将该全局边缘函数自动上传并部署到腾讯云 EdgeOne？[Y/n (直接回车立即上传)]:
+     ```
+     **直接敲一下回车**，`myship` 会通过内置的 EdgeOne API 自动匹配你的站点、创建/更新 `myship-cas-router` 函数并配置触发规则！
+
+*(注：若你日后更换了 COS 存储桶地址，随时运行 `myship setup-edge` 敲回车即可一键同步至云端；也可手动将 `~/.myship/edgeone-function.dist.js` 粘贴至 EdgeOne 控制台【边缘函数】中。)*
 
 🎉 **大功告成！** 现在你可以在任意前端项目下直接输入 `myship`，1 秒发布你的第一个线上 HTTPS 站点了！
 

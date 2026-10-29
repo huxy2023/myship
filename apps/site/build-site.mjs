@@ -356,8 +356,8 @@ ${parsedDocs.map((d) => `- [${d.title}](https://myship.ship.onehub.top${d.rawPat
 ## 快速命令速查 (Quick CLI Reference)
 
 - 全局安装: \`npm i -g @myship/cli\`
-- 交互式登录与绑定自有云底座: \`myship login\`
-- 生成专属 EdgeOne 边缘函数代码: \`myship build-edge-fn\`
+- 交互式登录与绑定自有云底座 (含 CAM 最小权限指引 / tccli 扫码 + 自动探测网关): \`myship login\`
+- 一键生成并自动上传全局 EdgeOne 边缘函数代码 (~/.myship/edgeone-function.dist.js): \`myship setup-edge\`
 - 零参数智能发布 (自动识别 .myship/project.json): \`myship\`
 - 发布指定子环境: \`myship -d v2\` 或 \`myship ./dist v2\`
 - 查看当前项目版本与域名: \`myship ls\` (全局按项目分组: \`myship ls --all\`)

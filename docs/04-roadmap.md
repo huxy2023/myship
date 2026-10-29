@@ -59,7 +59,7 @@ flowchart LR
 ## 四、Phase 3 详细设计：生态闭环与可视化管控
 
 1. **GitHub Actions PR 预览机器人**：
-   - 在任意业务仓库配置 10 行 GitHub Actions Workflow，每次提交 PR 自动执行 `npx github:huxy2023/myship ./dist pr-${{ github.event.number }}`，并在 PR 评论区自动回复独立预览链接。
+   - 在任意业务仓库配置 10 行 GitHub Actions Workflow，每次提交 PR 自动执行 `npx @myship/cli ./dist pr-${{ github.event.number }}`，并在 PR 评论区自动回复独立预览链接。
 2. **Web 可视化管理后台 (`https://console.ship.example.com`)**：
    - 直接托管在 `console.ship.example.com` 上的单页控制台，可视化查看所有项目的 `manifests/` 与 `aliases/`，支持网页端鼠标点击一键切流、对比两个版本的文件差异。
 3. **CAS 垃圾回收器 (`myship gc`)**：
