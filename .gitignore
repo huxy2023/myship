@@ -1,0 +1,8 @@
+node_modules/
+dist/
+apps/site/dist/
+.myship/history.json
+.myship/*.dist.js
+**/.cas-storage/
+**/.demo-dist/
+.DS_Store

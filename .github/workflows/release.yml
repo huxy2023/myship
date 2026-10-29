@@ -1,0 +1,44 @@
+name: Release to NPM
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish myship to NPM & GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js for NPM Registry
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Run Pre-Release E2E Verification
+        run: pnpm demo
+
+      - name: Publish to NPM with Provenance
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: gh release create "${{ github.ref_name }}" --generate-notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
