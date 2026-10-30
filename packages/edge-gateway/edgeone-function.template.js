@@ -13,18 +13,35 @@
 
 const COS_ORIGIN = '__MYSHIP_COS_ORIGIN__';
 
-// Phase 2: 基于 SHA-256 内容寻址的预编译云函数注册表 (多版本共存、0ms 原子回滚)
+// EdgeOne V8 运行时安全垫片 (兼容 Response.json 与 process.env 访问，防止 ReferenceError / TypeError)
+if (typeof Response !== 'undefined' && typeof Response.json !== 'function') {
+  Response.json = function (data, init) {
+    const opts = init || {};
+    const headers = Object.assign(
+      { 'Content-Type': 'application/json; charset=UTF-8' },
+      opts.headers || {}
+    );
+    return new Response(JSON.stringify(data), Object.assign({}, opts, { headers }));
+  };
+}
+if (typeof globalThis !== 'undefined' && typeof globalThis.process === 'undefined') {
+  globalThis.process = { env: {} };
+}
+
+// Phase 2: 基于 SHA-256 内容寻址的预编译云函数注册表 (100% 原生 V8 AST、零 eval/new Function 风险)
 const PRECOMPILED_FN_REGISTRY = {
 /* __MYSHIP_PRECOMPILED_FUNCTIONS__ */
 };
-const DYNAMIC_FN_CACHE = new Map(); // sha256 -> modExports
 
-// V8 Isolate 级全局内存缓存池
+// V8 Isolate 级全局内存缓存池 (严格遵循腾讯云 EdgeOne 128MB 内存配额红线)
 const ALIAS_CACHE = new Map();    // subdomain -> { deploymentId, ts }
 const MANIFEST_CACHE = new Map(); // deploymentId -> manifestObject
-const BLOB_CACHE = new Map();     // sha256 -> { bytes: ArrayBuffer, contentType: string, size: number }
-const MAX_BLOB_CACHE_ITEMS = 48;
-const MAX_CACHEABLE_BLOB_BYTES = 900 * 1024; // 900 KB 以下的热点文件直接驻留边缘节点内存
+const BLOB_CACHE = new Map();     // sha256 -> { view: Uint8Array, contentType: string, size: number }
+let blobCacheTotalBytes = 0;
+const MAX_BLOB_CACHE_ITEMS = 32;
+const MAX_CACHEABLE_BLOB_BYTES = 256 * 1024;       // 单文件最大缓存 256 KB (大文件走流式直传与边缘节点 Cache)
+const MAX_BLOB_CACHE_TOTAL_BYTES = 8 * 1024 * 1024; // 内存池总容量硬上限 8 MB (远低于 EdgeOne 128 MB 限制)
+const MAX_EDGEONE_BODY_BYTES = 1024 * 1024;         // EdgeOne 边缘函数客户端请求 Body 硬上限 1 MB
 
 const EXT_MIME_FALLBACK = {
   '.html': 'text/html; charset=UTF-8',
@@ -142,41 +159,35 @@ async function resolveManifest(deploymentId) {
   return manifest;
 }
 
-async function resolveServerlessModule(sha256) {
+function resolveServerlessModule(sha256) {
   if (PRECOMPILED_FN_REGISTRY[sha256]) {
     return { mod: PRECOMPILED_FN_REGISTRY[sha256], mode: 'PRECOMPILED-V8' };
   }
-  if (DYNAMIC_FN_CACHE.has(sha256)) {
-    return { mod: DYNAMIC_FN_CACHE.get(sha256), mode: 'DYNAMIC-CACHE' };
+  return null;
+}
+
+function extractPlainHeaders(headersInput) {
+  const out = {};
+  if (!headersInput) return out;
+  if (typeof headersInput.forEach === 'function') {
+    headersInput.forEach((v, k) => {
+      out[k] = v;
+    });
+    return out;
   }
-  try {
-    const res = await fetch(`${COS_ORIGIN}/blobs/${sha256}`);
-    if (!res.ok) return null;
-    const rawCode = await res.text();
-    const transformed = rawCode
-      .replace(/export\s+default\s+async\s+function/g, '__exports.default = async function')
-      .replace(/export\s+default\s+function/g, '__exports.default = function')
-      .replace(/export\s+default\s+/g, '__exports.default = ')
-      .replace(
-        /export\s+async\s+function\s+([A-Za-z0-9_$]+)/g,
-        '__exports.$1 = async function $1'
-      )
-      .replace(/export\s+function\s+([A-Za-z0-9_$]+)/g, '__exports.$1 = function $1')
-      .replace(
-        /export\s+(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*=/g,
-        'const $1 = __exports.$1 ='
-      );
-    const factory = new Function(`const __exports = {};\n${transformed}\nreturn __exports;`);
-    const mod = factory();
-    DYNAMIC_FN_CACHE.set(sha256, mod);
-    return { mod, mode: 'DYNAMIC-JIT' };
-  } catch {
-    return null;
+  if (typeof headersInput === 'object') {
+    for (const [k, v] of Object.entries(headersInput)) {
+      if (v !== undefined) out[k] = String(v);
+    }
   }
+  return out;
 }
 
 async function invokeEdgeFunction(modExports, execMode, request, context) {
   const method = (request.method || 'GET').toUpperCase();
+  const methodTitle = method.charAt(0).toUpperCase() + method.slice(1).toLowerCase();
+  const eoMethodKey = `onRequest${methodTitle}`; // 兼容 EdgeOne 官方 onRequestGet / onRequestPost 规范
+
   const baseHeaders = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
@@ -190,15 +201,54 @@ async function invokeEdgeFunction(modExports, execMode, request, context) {
     'X-MyShip-Function-Mode': execMode,
   };
 
-  if (method === 'OPTIONS' && typeof modExports?.OPTIONS !== 'function') {
+  // EdgeOne 边缘函数规范: 请求 Body 最大限制 1 MB
+  const contentLength = Number(request.headers.get('content-length') || 0);
+  if (contentLength > MAX_EDGEONE_BODY_BYTES) {
+    return new Response(
+      JSON.stringify({
+        error: 'Payload Too Large: EdgeOne Edge Functions limit request body to 1 MB (1,048,576 bytes).',
+        contentLength,
+        limitBytes: MAX_EDGEONE_BODY_BYTES,
+        route: context.route,
+      }),
+      {
+        status: 413,
+        headers: Object.assign({}, baseHeaders, {
+          'Content-Type': 'application/json; charset=UTF-8',
+        }),
+      }
+    );
+  }
+
+  if (
+    method === 'OPTIONS' &&
+    typeof modExports?.OPTIONS !== 'function' &&
+    typeof modExports?.onRequestOptions !== 'function'
+  ) {
     return new Response(null, { status: 204, headers: baseHeaders });
   }
 
-  const handler =
-    (modExports && typeof modExports[method] === 'function' && modExports[method]) ||
-    (modExports && typeof modExports.default === 'function' && modExports.default) ||
-    (modExports && typeof modExports.handler === 'function' && modExports.handler) ||
-    (typeof modExports === 'function' ? modExports : null);
+  let handler = null;
+  let isEdgeOneContextFirst = false;
+
+  if (modExports && typeof modExports[eoMethodKey] === 'function') {
+    handler = modExports[eoMethodKey];
+    isEdgeOneContextFirst = true;
+  } else if (modExports && typeof modExports[method] === 'function') {
+    handler = modExports[method];
+  } else if (modExports && typeof modExports.onRequest === 'function') {
+    handler = modExports.onRequest;
+    isEdgeOneContextFirst = true;
+  } else if (modExports && typeof modExports.default === 'function') {
+    handler = modExports.default;
+    if (handler.name && handler.name.startsWith('onRequest')) {
+      isEdgeOneContextFirst = true;
+    }
+  } else if (modExports && typeof modExports.handler === 'function') {
+    handler = modExports.handler;
+  } else if (typeof modExports === 'function') {
+    handler = modExports;
+  }
 
   if (!handler) {
     return new Response(
@@ -209,32 +259,45 @@ async function invokeEdgeFunction(modExports, execMode, request, context) {
       }),
       {
         status: 405,
-        headers: { ...baseHeaders, 'Content-Type': 'application/json; charset=UTF-8' },
+        headers: Object.assign({}, baseHeaders, {
+          'Content-Type': 'application/json; charset=UTF-8',
+        }),
       }
     );
   }
 
   try {
-    const result = await handler(request, context);
-    if (result && typeof result === 'object' && typeof result.arrayBuffer === 'function' && result.headers) {
-      const merged = new Headers(result.headers);
-      for (const [k, v] of Object.entries(baseHeaders)) {
-        if (!merged.has(k)) merged.set(k, v);
-      }
+    const result = isEdgeOneContextFirst
+      ? await handler(context, request)
+      : await handler(request, context);
+
+    if (
+      result &&
+      typeof result === 'object' &&
+      typeof result.arrayBuffer === 'function' &&
+      result.headers
+    ) {
+      // 遵循 EdgeOne V8 规范: 使用纯对象 Headers 而非 new Headers()
+      const customHeaders = extractPlainHeaders(result.headers);
+      const mergedPlain = Object.assign({}, baseHeaders, customHeaders);
       return new Response(result.body, {
         status: result.status || 200,
-        headers: merged,
+        headers: mergedPlain,
       });
     }
     if (typeof result === 'string') {
       return new Response(result, {
         status: 200,
-        headers: { ...baseHeaders, 'Content-Type': 'text/plain; charset=UTF-8' },
+        headers: Object.assign({}, baseHeaders, {
+          'Content-Type': 'text/plain; charset=UTF-8',
+        }),
       });
     }
     return new Response(JSON.stringify(result ?? { ok: true }), {
       status: 200,
-      headers: { ...baseHeaders, 'Content-Type': 'application/json; charset=UTF-8' },
+      headers: Object.assign({}, baseHeaders, {
+        'Content-Type': 'application/json; charset=UTF-8',
+      }),
     });
   } catch (err) {
     return new Response(
@@ -245,7 +308,9 @@ async function invokeEdgeFunction(modExports, execMode, request, context) {
       }),
       {
         status: 500,
-        headers: { ...baseHeaders, 'Content-Type': 'application/json; charset=UTF-8' },
+        headers: Object.assign({}, baseHeaders, {
+          'Content-Type': 'application/json; charset=UTF-8',
+        }),
       }
     );
   }
@@ -296,11 +361,11 @@ async function handleRequest(request, event) {
 
   const fnEntry = manifest.functions && manifest.functions[normalizedRoute];
   if (fnEntry && fnEntry.sha256) {
-    const resolvedFn = await resolveServerlessModule(fnEntry.sha256);
+    const resolvedFn = resolveServerlessModule(fnEntry.sha256);
     if (!resolvedFn || !resolvedFn.mod) {
       return new Response(
         JSON.stringify({
-          error: `Serverless Function Blob Not Registered: ${fnEntry.sha256} (run 'myship setup-edge' to sync)`,
+          error: `Serverless Function Blob Not Precompiled: ${fnEntry.sha256} (run 'myship setup-edge' to sync)`,
           route: normalizedRoute,
           deploymentId,
         }),
@@ -332,7 +397,10 @@ async function handleRequest(request, event) {
       }
     } catch {}
 
+    // 完整透传腾讯云 EdgeOne 原生扩展属性 (request.eo.geo / request.eo.clientIp / event.waitUntil)
+    const eoMeta = (request && request.eo) || {};
     const context = {
+      request,
       deploymentId,
       subdomain,
       project: manifest.project || 'default',
@@ -341,6 +409,13 @@ async function handleRequest(request, event) {
       functionSha256: fnEntry.sha256,
       url,
       query,
+      params: {},
+      env: {},
+      eo: eoMeta,
+      geo: eoMeta.geo || {},
+      clientIp: eoMeta.clientIp || request.headers.get('x-forwarded-for') || '',
+      waitUntil:
+        event && typeof event.waitUntil === 'function' ? event.waitUntil.bind(event) : function () {},
     };
     return await invokeEdgeFunction(resolvedFn.mod, resolvedFn.mode, request, context);
   }
@@ -390,10 +465,10 @@ async function handleRequest(request, event) {
 
   const rangeHeader = request.headers.get('range');
 
-  // 6. 若无 Range 分片请求且已驻留边缘节点内存，直接 0ms 从内存返回
+  // 6. 若无 Range 分片请求且已驻留边缘节点内存，直接 0ms 从内存返回 (零拷贝 Uint8Array 视图)
   if (!rangeHeader && BLOB_CACHE.has(sha256)) {
     const cachedBlob = BLOB_CACHE.get(sha256);
-    return new Response(cachedBlob.bytes.slice(0), {
+    return new Response(cachedBlob.view, {
       status: 200,
       headers: {
         'Content-Type': contentType,
@@ -425,16 +500,27 @@ async function handleRequest(request, event) {
 
   if (!rangeHeader && (fileEntry.size || 0) > 0 && fileEntry.size <= MAX_CACHEABLE_BLOB_BYTES) {
     const arrBuf = await blobRes.arrayBuffer();
-    if (BLOB_CACHE.size >= MAX_BLOB_CACHE_ITEMS) {
-      const oldest = BLOB_CACHE.keys().next().value;
-      BLOB_CACHE.delete(oldest);
+    const view = new Uint8Array(arrBuf);
+    const byteLen = view.byteLength;
+    if (byteLen <= MAX_BLOB_CACHE_TOTAL_BYTES) {
+      while (
+        BLOB_CACHE.size >= MAX_BLOB_CACHE_ITEMS ||
+        blobCacheTotalBytes + byteLen > MAX_BLOB_CACHE_TOTAL_BYTES
+      ) {
+        const oldestKey = BLOB_CACHE.keys().next().value;
+        if (!oldestKey) break;
+        const oldestVal = BLOB_CACHE.get(oldestKey);
+        blobCacheTotalBytes -= oldestVal ? oldestVal.size : 0;
+        BLOB_CACHE.delete(oldestKey);
+      }
+      BLOB_CACHE.set(sha256, { view, contentType, size: byteLen });
+      blobCacheTotalBytes += byteLen;
     }
-    BLOB_CACHE.set(sha256, { bytes: arrBuf, contentType, size: arrBuf.byteLength });
-    return new Response(arrBuf.slice(0), {
+    return new Response(view, {
       status: 200,
       headers: {
         'Content-Type': contentType,
-        'Content-Length': String(arrBuf.byteLength),
+        'Content-Length': String(byteLen),
         ETag: etag,
         'Accept-Ranges': 'bytes',
         'X-MyShip-Engine': 'EdgeOne-CAS-Gateway/2.0-FullStack',

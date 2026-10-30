@@ -407,6 +407,8 @@ export async function GET(request, context) {
     deploymentId: context.deploymentId,
     route: context.route,
     functionSha256: context.functionSha256,
+    clientIp: context.clientIp || undefined,
+    geo: context.geo && Object.keys(context.geo).length > 0 ? context.geo : undefined,
     timestamp: new Date().toISOString(),
   };
 }

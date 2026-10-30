@@ -161,6 +161,19 @@ export async function GET(request, context) {
 - 访问 `https://app1-v2.ship.example.com/api/hello` 立即执行 **V2 版本**的云函数代码；
 - 当执行 `myship rollback` 时，主域名的前端 HTML 与 `/api/*` 后端接口**在同一毫秒内同步回退到旧版本**，彻底杜绝前后端发版时间差导致的接口报错！
 
+### 3. 腾讯云 EdgeOne V8 运行时规范与内置防超限护栏
+
+由于云端网关运行在腾讯云 **EdgeOne 全球边缘节点 V8 Isolate 沙盒**中，`MyShip` 已针对 EdgeOne 官方配额与 Runtime API 规范内置了静态检查与运行时水位线保护：
+
+| 规范维度 | 腾讯云 EdgeOne 官方限制 | MyShip 内置护栏与兼容策略 |
+| :--- | :--- | :--- |
+| **运行环境** | 纯 V8 Isolate（非 Node.js），不支持 `fs` / `path` / `net` / `child_process` | CLI 部署期静态扫描拦截 Node.js 原生内置模块，提示改用 `fetch` / `crypto.subtle` |
+| **函数签名兼容** | 官方支持 `onRequest(context)` / `onRequestGet(context)`，且扩展了 `request.eo` | **双向全兼容**：同时支持标准 `GET(request, context)` 与 EdgeOne `onRequestGet(context)`，自动注入 `context.geo` 与 `context.clientIp` |
+| **API 差异垫片** | 原生 V8 未提供 `Response.json()`、`process.env`，禁止 `new Headers()` 复杂构造与 `eval` | 网关自动注入 `Response.json` 与 `process.env` 兼容垫片，使用纯对象 Headers 与 100% 预编译 AST（零 `eval`/`new Function`） |
+| **运行内存上限** | 单实例最大 **128 MB** | 边缘内存缓存采用 `Uint8Array` 零拷贝视图，并设 **8 MB 总容量上限 + 256 KB 单文件上限**，严防 OOM |
+| **代码包体积上限** | 单函数代码包最大 **5 MB** | 单 `api/*.js` 限制 `512 KB`，全局预编译池设 **3.5 MB 自动水位线淘汰**（优先保留最新活跃版本） |
+| **请求体与执行配额** | 客户端请求 Body 最大 **1 MB**；单次 CPU 时间 **200 ms**；子请求 `fetch` 最多 **64 次（并发 8）** | 网关自动拦截 `>1MB` 请求并返回标准 `413 Payload Too Large` JSON 提示 |
+
 ---
 
 ## 五、免云账号本地离线沙盒模式 (`--local`)

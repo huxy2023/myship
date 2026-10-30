@@ -217,7 +217,52 @@ export function scanApiFunctions(apiDir) {
     .sort((a, b) => a.route.localeCompare(b.route));
 }
 
-export function transformEsmToFactorySource(sourceCode, label = 'api-fn') {
+const MAX_SINGLE_API_FN_BYTES = 512 * 1024; // 单文件最大 512 KB (保障远低于 EdgeOne 5MB 总包上限)
+const MAX_PRECOMPILED_POOL_BYTES = Math.floor(3.5 * 1024 * 1024); // 预编译函数池总预算 3.5 MB (EdgeOne 边缘函数硬限制为 5 MB)
+
+export function validateEdgeFunctionCompliance(sourceCode, label = 'api-fn', sizeBytes = 0) {
+  const code = String(sourceCode || '');
+  const actualBytes = sizeBytes || Buffer.byteLength(code, 'utf8');
+  if (actualBytes > MAX_SINGLE_API_FN_BYTES) {
+    throw new Error(
+      `[EdgeOne 规范拦截] 云函数文件过大 (${label}: ${(actualBytes / 1024).toFixed(1)} KB > 512 KB)。腾讯云 EdgeOne 边缘函数单包上限为 5MB，请精简函数体积。`
+    );
+  }
+
+  // 拦截 EdgeOne V8 运行时不支持的 Node.js 原生内置模块
+  const nodeBuiltinMatch =
+    code.match(/from\s+['"](?:node:[^'"]+|fs|path|http|https|net|tls|child_process|os|dgram|cluster)['"]/) ||
+    code.match(/\brequire\s*\(\s*['"][^'"]+['"]\s*\)/) ||
+    code.match(/\bfs\.(?:readFile|writeFile|readFileSync|writeFileSync|existsSync)\b/);
+
+  if (nodeBuiltinMatch) {
+    throw new Error(
+      `[EdgeOne V8 规范拦截] 云函数 (${label}) 包含不支持的 Node.js API (${nodeBuiltinMatch[0].trim()})。腾讯云 EdgeOne 边缘函数运行在纯 V8 沙盒 (非 Node.js)，请改用 Web 标准 API (fetch / crypto.subtle / TextEncoder)。`
+    );
+  }
+
+  const warnings = [];
+  if (/\bprocess\.env\b/.test(code)) {
+    warnings.push(
+      `检测到 process.env (EdgeOne V8 推荐使用 context.env，网关已自动注入空 process.env 防崩垫片)`
+    );
+  }
+  if (/\b(?:eval|new\s+Function)\s*\(/.test(code)) {
+    warnings.push(`检测到 eval/new Function (EdgeOne V8 沙盒严格限制动态代码求值，建议移除)`);
+  }
+  if (/\bResponse\.json\s*\(/.test(code)) {
+    warnings.push(`检测到 Response.json() (EdgeOne 原生 V8 未内置该方法，MyShip 网关已自动注入兼容 Polyfill)`);
+  }
+  return { ok: true, warnings };
+}
+
+export function transformEsmToFactorySource(sourceCode, label = 'api-fn', validate = false) {
+  if (validate) {
+    const { warnings } = validateEdgeFunctionCompliance(sourceCode, label);
+    for (const w of warnings) {
+      console.log(`  ⚠️  [EdgeOne 规范提示 · ${label}] ${w}`);
+    }
+  }
   const transformed = String(sourceCode)
     .replace(/export\s+default\s+async\s+function/g, '__exports.default = async function')
     .replace(/export\s+default\s+function/g, '__exports.default = function')
@@ -250,6 +295,9 @@ export function compileServerlessModule(sourceCode, label = 'api-fn') {
 
 export async function invokeServerlessModule(modExports, request, context = {}) {
   const method = (request.method || 'GET').toUpperCase();
+  const methodTitle = method.charAt(0).toUpperCase() + method.slice(1).toLowerCase();
+  const eoMethodKey = `onRequest${methodTitle}`;
+
   const baseHeaders = {
     'access-control-allow-origin': '*',
     'access-control-allow-methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
@@ -264,15 +312,35 @@ export async function invokeServerlessModule(modExports, request, context = {}) 
     'x-myship-function-sha256': context.sha256 || '',
   };
 
-  if (method === 'OPTIONS' && typeof modExports?.OPTIONS !== 'function') {
+  if (
+    method === 'OPTIONS' &&
+    typeof modExports?.OPTIONS !== 'function' &&
+    typeof modExports?.onRequestOptions !== 'function'
+  ) {
     return new Response(null, { status: 204, headers: baseHeaders });
   }
 
-  const handler =
-    (modExports && typeof modExports[method] === 'function' && modExports[method]) ||
-    (modExports && typeof modExports.default === 'function' && modExports.default) ||
-    (modExports && typeof modExports.handler === 'function' && modExports.handler) ||
-    (typeof modExports === 'function' ? modExports : null);
+  let handler = null;
+  let isEdgeOneContextFirst = false;
+
+  if (modExports && typeof modExports[eoMethodKey] === 'function') {
+    handler = modExports[eoMethodKey];
+    isEdgeOneContextFirst = true;
+  } else if (modExports && typeof modExports[method] === 'function') {
+    handler = modExports[method];
+  } else if (modExports && typeof modExports.onRequest === 'function') {
+    handler = modExports.onRequest;
+    isEdgeOneContextFirst = true;
+  } else if (modExports && typeof modExports.default === 'function') {
+    handler = modExports.default;
+    if (handler.name && handler.name.startsWith('onRequest')) {
+      isEdgeOneContextFirst = true;
+    }
+  } else if (modExports && typeof modExports.handler === 'function') {
+    handler = modExports.handler;
+  } else if (typeof modExports === 'function') {
+    handler = modExports;
+  }
 
   if (!handler) {
     return new Response(
@@ -288,12 +356,30 @@ export async function invokeServerlessModule(modExports, request, context = {}) 
     );
   }
 
+  const enrichedContext = {
+    request,
+    params: {},
+    env: {},
+    eo: (request && request.eo) || {},
+    geo: (request && request.eo && request.eo.geo) || {},
+    clientIp: '127.0.0.1',
+    waitUntil: () => {},
+    functionSha256: context.sha256 || '',
+    ...context,
+  };
+
   try {
-    const result = await handler(request, context);
+    const result = isEdgeOneContextFirst
+      ? await handler(enrichedContext, request)
+      : await handler(request, enrichedContext);
     if (result && typeof result === 'object' && typeof result.arrayBuffer === 'function' && result.headers) {
-      const mergedHeaders = new Headers(result.headers);
-      for (const [k, v] of Object.entries(baseHeaders)) {
-        if (!mergedHeaders.has(k)) mergedHeaders.set(k, v);
+      const mergedHeaders = { ...baseHeaders };
+      if (typeof result.headers.forEach === 'function') {
+        result.headers.forEach((v, k) => {
+          mergedHeaders[k] = v;
+        });
+      } else if (typeof result.headers === 'object') {
+        Object.assign(mergedHeaders, result.headers);
       }
       return new Response(result.body, {
         status: result.status || 200,
@@ -546,8 +632,8 @@ export function deployDirectory(
   }
 
   for (const fn of apiFunctions) {
-    // 静态语法检查与 ESM 转换验证
-    transformEsmToFactorySource(fn.sourceCode, fn.relSource);
+    // 静态语法检查 + EdgeOne V8 规范校验 + ESM 转换验证
+    transformEsmToFactorySource(fn.sourceCode, fn.relSource, true);
     const content = Buffer.from(fn.sourceCode, 'utf8');
     const hash = sha256Hex(content);
     const blobPath = resolve(storageDir, 'blobs', hash);
@@ -754,7 +840,7 @@ export async function deployRemoteDirectory(
   let newFunctionAdded = false;
 
   for (const fn of apiFunctions) {
-    transformEsmToFactorySource(fn.sourceCode, fn.relSource);
+    transformEsmToFactorySource(fn.sourceCode, fn.relSource, true);
     const content = Buffer.from(fn.sourceCode, 'utf8');
     const hash = sha256Hex(content);
     const blobKey = `blobs/${hash}`;
@@ -1121,14 +1207,33 @@ export async function listRemoteState({ projectFilter = null, showAll = false } 
 // ============================================================================
 function buildPrecompiledFunctionsBlock(functionsPool = {}) {
   const entries = [];
-  for (const [sha256, item] of Object.entries(functionsPool)) {
+  let usedBytes = 0;
+
+  // 按更新时间倒序排列，优先保障最新活跃版本的云函数驻留，严格限制总体积不超过 3.5 MB (EdgeOne 单函数硬上限 5 MB)
+  const sortedItems = Object.entries(functionsPool).sort(([, a], [, b]) => {
+    const ta = a && a.updatedAt ? String(a.updatedAt) : '';
+    const tb = b && b.updatedAt ? String(b.updatedAt) : '';
+    return tb.localeCompare(ta);
+  });
+
+  for (const [sha256, item] of sortedItems) {
     if (!item || !item.code) continue;
     try {
       const factoryExpr = transformEsmToFactorySource(
         item.code,
-        item.source || item.route || sha256.slice(0, 8)
+        item.source || item.route || sha256.slice(0, 8),
+        false
       );
-      entries.push(`  "${sha256}": ${factoryExpr}(),`);
+      const line = `  "${sha256}": ${factoryExpr}(),`;
+      const lineBytes = Buffer.byteLength(line, 'utf8');
+      if (usedBytes + lineBytes > MAX_PRECOMPILED_POOL_BYTES) {
+        console.warn(
+          `  ⚠️  [EdgeOne 5MB 容量水位线保护] 预编译云函数池已达 3.5MB 安全阈值，自动跳过早期历史版本块 (${sha256.slice(0, 8)}...)`
+        );
+        continue;
+      }
+      entries.push(line);
+      usedBytes += lineBytes;
     } catch {
       // ignore invalid legacy pool item
     }
