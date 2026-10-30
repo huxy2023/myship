@@ -15,6 +15,7 @@
 | **0 秒原子切流/回滚** | 毫秒级切换任意子域名指向的构建版本 | ✅ | ✅ | 仅修改 80 字节 `aliases/<subdomain>.json` 指针，无需重新构建或复制文件 |
 | **项目隔离与全局视图** | `myship ls` 与 `myship ls --all` | ✅ | ✅ | 默认仅显示当前项目的构建与域名；加 `--all` 按项目分组展示全局总览 |
 | **SPA History 路由** | 自动回退 `/200.html` 或 `/index.html` | ✅ | ✅ | 原生支持 Vue Router / React Router 的 `createWebHistory()` 模式 |
+| **约定式 Serverless 云函数** | `api/**/*.js` 零配置自动路由与 CAS 寻址 | ✅ | ✅ | 自动识别 `api/*.js` 映射为 `/api/*` 接口，与前端共享同一 `dpl_<id>` 快照，支持前后端 0 秒同帧回滚 |
 | **零依赖跨机认证** | 三级凭证自动兜底 + 边缘函数生成 | — | ✅ | 支持环境变量、`~/.myship/config.json` 与 `~/.tccli/default.credential` 自动复用 |
 
 ---
@@ -127,7 +128,42 @@ myship alias v2 dpl_6e46ed99
 
 ---
 
-## 四、免云账号本地离线沙盒模式 (`--local`)
+## 四、约定式 Serverless 云函数 (`api/*.js`) 与全栈原子回滚
+
+无需配置任何路由文件或额外云资源，只需在你的项目根目录（或构建产物目录）下创建 `api/` 文件夹并编写标准的 JavaScript 模块，`myship` 就会在部署时自动将其编译为边缘 Serverless 云函数，并与当前前端页面绑定在同一个 `dpl_<id>` 版本快照中！
+
+### 1. 编写你的第一个云函数 (`api/hello.js`)
+
+支持标准的 Web `Request -> Response` 默认导出，也支持按 HTTP 方法导出（`GET` / `POST` / `PUT` / `DELETE`），可直接返回普通 JSON 对象：
+
+```javascript
+// api/hello.js -> 自动映射为 https://<你的子域名>/api/hello
+export async function GET(request, context) {
+  const url = new URL(request.url);
+  const name = url.searchParams.get('name') || 'MyShip Developer';
+
+  return {
+    ok: true,
+    message: `Hello, ${name}! Executed at Edge V8 Isolate.`,
+    project: context.project,
+    deploymentId: context.deploymentId, // 与当前前端页面严格同源的构建版本 ID
+    subdomain: context.subdomain,
+    functionSha256: context.functionSha256,
+    timestamp: new Date().toISOString(),
+  };
+}
+```
+
+### 2. 前后端同一毫秒原子切流与回滚
+
+当你修改了前端页面和 `api/hello.js` 并执行 `myship -d v2` 时：
+- 访问 `https://app1.ship.example.com/api/hello` 依然执行 **V1 版本**的云函数代码；
+- 访问 `https://app1-v2.ship.example.com/api/hello` 立即执行 **V2 版本**的云函数代码；
+- 当执行 `myship rollback` 时，主域名的前端 HTML 与 `/api/*` 后端接口**在同一毫秒内同步回退到旧版本**，彻底杜绝前后端发版时间差导致的接口报错！
+
+---
+
+## 五、免云账号本地离线沙盒模式 (`--local`)
 
 如果你在没有网络的环境下开发，或者想在不配置云账号的情况下体验完整功能，只需加上 `--local`（或直接运行仓库自带的演示脚本）：
 

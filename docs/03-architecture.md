@@ -36,15 +36,22 @@ flowchart LR
   - **若返回 `404`**：仅上传真正发生变化的增量文件块。
 - 无论你手头有 10 个项目还是发布了 1,000 个版本，相同的公共依赖库、图标、字体在 COS 里永远只有 1 份。
 
-### 2. `manifests/dpl_<id>.json`（构建快照清单 · 永久不可变）
-- 记录某一次构建所属的项目命名空间（`project`）、文件树路径，以及每个路径对应的 `sha256`、`size` 和 `contentType`：
+### 2. `manifests/dpl_<id>.json`（全栈构建快照清单 · 永久不可变）
+- 记录某一次构建所属的项目命名空间（`project`）、前端静态文件树（`files`）与后端 Serverless 云函数路由表（`functions`），以及每个路径对应的 `sha256` 内容哈希：
   ```json
   {
     "id": "dpl_4f788e9d",
     "project": "app1",
     "immutableSubdomain": "app1-4f788e9d",
     "createdAt": "2026-10-29T05:36:31.465Z",
-    "stats": { "totalFiles": 12, "uploadedBlobs": 1, "reusedBlobs": 11 },
+    "stats": {
+      "totalFiles": 12,
+      "uploadedBlobs": 1,
+      "reusedBlobs": 11,
+      "totalFunctions": 1,
+      "uploadedFunctions": 1,
+      "reusedFunctions": 0
+    },
     "spaFallback": "/index.html",
     "files": {
       "/assets/vendor.js": {
@@ -57,10 +64,19 @@ flowchart LR
         "size": 2194,
         "contentType": "text/html; charset=UTF-8"
       }
+    },
+    "functions": {
+      "/api/hello": {
+        "sha256": "36908c5530bc8c08...",
+        "entryFile": "api/hello.js",
+        "runtime": "edge-js",
+        "size": 412
+      }
     }
   }
   ```
 - **为什么能保留无限个历史版本？** 因为每个构建快照清单只是一个约 `1KB` 的 JSON 文件！保留 10,000 个历史构建清单仅占约 `10MB` 空间，成本几乎为零。
+- **为什么前后端能做到 0 秒同帧回滚？** 因为 `functions` 的代码同样以 `sha256` 唯一索引预置在边缘 V8 引擎与 `blobs/<sha256>` 池中。子域名指针切换时，前端静态页面与后端 `/api/*` 云函数通过同一份 `manifest` 自动锁定对应版本的 `sha256`，绝不串版本！
 
 ### 3. `aliases/<subdomain>.json`（动态域名路由指针表 · 极小可变）
 - 每个子域名对应一个仅约 `80 字节` 的轻量指针文件：

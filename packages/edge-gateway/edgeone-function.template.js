@@ -1,15 +1,23 @@
 /**
- * MyShip CAS Edge Router v2.0 — 腾讯云 EdgeOne 标准站点边缘函数模板
+ * MyShip CAS Edge Router v2.0 (Full-Stack Edition) — 腾讯云 EdgeOne 标准站点边缘函数模板
  *
- * 核心性能优化 (v2.0):
- *   1. 三级边缘内存缓存 (V8 Isolate Memory Cache):
- *      - MANIFEST_CACHE: 不可变 manifests/<dpl_id>.json 永久驻留边缘内存 (0ms 读取)
- *      - BLOB_CACHE: 常用中小型静态块 (< 1MB) 基于 SHA-256 驻留边缘内存 (跨区域/海外节点 0ms 响应)
- *      - ALIAS_CACHE: 域名指针采用 Micro-TTL (2s) + SWR 后台异步刷新 (event.waitUntil)，兼顾 0ms 首屏与秒级切流
- *   2. 原生支持 ETag (304 Not Modified) 与 HTTP 206 Partial Content (Range 视频流分片秒开)
+ * 核心特性:
+ *   1. Phase 2 约定式 Serverless 云函数 (`api/*.js`) 与前后端同版本原子切换:
+ *      - 根据当前子域名绑定的 manifests/<dpl_id>.json 动态匹配 `manifest.functions[route]`
+ *      - 通过 `PRECOMPILED_FN_REGISTRY[sha256]` (0ms 原生 V8 执行) + `DYNAMIC_FN_CACHE` 双引擎驱动
+ *      - 当执行 `myship rollback` 时，前端静态资源与 `/api/*` 后端接口在同一毫秒内原子切换
+ *   2. 三级边缘内存缓存 (V8 Isolate Memory Cache):
+ *      - MANIFEST_CACHE / BLOB_CACHE / ALIAS_CACHE (SWR 后台异步刷新)
+ *   3. 原生支持 ETag (304 Not Modified) 与 HTTP 206 Partial Content (Range 视频流分片秒开)
  */
 
 const COS_ORIGIN = '__MYSHIP_COS_ORIGIN__';
+
+// Phase 2: 基于 SHA-256 内容寻址的预编译云函数注册表 (多版本共存、0ms 原子回滚)
+const PRECOMPILED_FN_REGISTRY = {
+/* __MYSHIP_PRECOMPILED_FUNCTIONS__ */
+};
+const DYNAMIC_FN_CACHE = new Map(); // sha256 -> modExports
 
 // V8 Isolate 级全局内存缓存池
 const ALIAS_CACHE = new Map();    // subdomain -> { deploymentId, ts }
@@ -77,6 +85,9 @@ async function fetchCosJson(key, cacheTtl = 0) {
 }
 
 async function resolveDeploymentId(subdomain, event) {
+  if (subdomain === '_myship_probe') {
+    return null;
+  }
   // 若子域名本身就是不可变快照域名 (如 dpl-xxxx 或 myship-e3e50726)，直接零网络开销解析出 dpl_<hash>
   if (subdomain.startsWith('dpl-')) {
     return subdomain.replace(/^dpl-/, 'dpl_');
@@ -100,7 +111,6 @@ async function resolveDeploymentId(subdomain, event) {
 
   if (cached) {
     const age = now - cached.ts;
-    // 2.5秒内完全新鲜，直接 0ms 返回；2.5s ~ 60s 内立即返回缓存并在后台异步刷新 (SWR)
     if (age < 2500) {
       return cached.deploymentId;
     }
@@ -122,7 +132,7 @@ async function resolveManifest(deploymentId) {
     return MANIFEST_CACHE.get(deploymentId);
   }
   const manifest = await fetchCosJson(`manifests/${deploymentId}.json`, 31536000);
-  if (manifest && manifest.files) {
+  if (manifest && (manifest.files || manifest.functions)) {
     if (MANIFEST_CACHE.size >= 64) {
       const oldestKey = MANIFEST_CACHE.keys().next().value;
       MANIFEST_CACHE.delete(oldestKey);
@@ -130,6 +140,115 @@ async function resolveManifest(deploymentId) {
     MANIFEST_CACHE.set(deploymentId, manifest);
   }
   return manifest;
+}
+
+async function resolveServerlessModule(sha256) {
+  if (PRECOMPILED_FN_REGISTRY[sha256]) {
+    return { mod: PRECOMPILED_FN_REGISTRY[sha256], mode: 'PRECOMPILED-V8' };
+  }
+  if (DYNAMIC_FN_CACHE.has(sha256)) {
+    return { mod: DYNAMIC_FN_CACHE.get(sha256), mode: 'DYNAMIC-CACHE' };
+  }
+  try {
+    const res = await fetch(`${COS_ORIGIN}/blobs/${sha256}`);
+    if (!res.ok) return null;
+    const rawCode = await res.text();
+    const transformed = rawCode
+      .replace(/export\s+default\s+async\s+function/g, '__exports.default = async function')
+      .replace(/export\s+default\s+function/g, '__exports.default = function')
+      .replace(/export\s+default\s+/g, '__exports.default = ')
+      .replace(
+        /export\s+async\s+function\s+([A-Za-z0-9_$]+)/g,
+        '__exports.$1 = async function $1'
+      )
+      .replace(/export\s+function\s+([A-Za-z0-9_$]+)/g, '__exports.$1 = function $1')
+      .replace(
+        /export\s+(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*=/g,
+        'const $1 = __exports.$1 ='
+      );
+    const factory = new Function(`const __exports = {};\n${transformed}\nreturn __exports;`);
+    const mod = factory();
+    DYNAMIC_FN_CACHE.set(sha256, mod);
+    return { mod, mode: 'DYNAMIC-JIT' };
+  } catch {
+    return null;
+  }
+}
+
+async function invokeEdgeFunction(modExports, execMode, request, context) {
+  const method = (request.method || 'GET').toUpperCase();
+  const baseHeaders = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With',
+    'Cache-Control': 'no-store, no-cache, must-revalidate',
+    'X-MyShip-Engine': 'EdgeOne-CAS-Gateway/2.0-FullStack',
+    'X-MyShip-Subdomain': context.subdomain || '',
+    'X-MyShip-Deployment-Id': context.deploymentId || '',
+    'X-MyShip-Function-Route': context.route || '',
+    'X-MyShip-Function-Sha256': context.sha256 || '',
+    'X-MyShip-Function-Mode': execMode,
+  };
+
+  if (method === 'OPTIONS' && typeof modExports?.OPTIONS !== 'function') {
+    return new Response(null, { status: 204, headers: baseHeaders });
+  }
+
+  const handler =
+    (modExports && typeof modExports[method] === 'function' && modExports[method]) ||
+    (modExports && typeof modExports.default === 'function' && modExports.default) ||
+    (modExports && typeof modExports.handler === 'function' && modExports.handler) ||
+    (typeof modExports === 'function' ? modExports : null);
+
+  if (!handler) {
+    return new Response(
+      JSON.stringify({
+        error: `Method ${method} Not Allowed`,
+        route: context.route,
+        deploymentId: context.deploymentId,
+      }),
+      {
+        status: 405,
+        headers: { ...baseHeaders, 'Content-Type': 'application/json; charset=UTF-8' },
+      }
+    );
+  }
+
+  try {
+    const result = await handler(request, context);
+    if (result && typeof result === 'object' && typeof result.arrayBuffer === 'function' && result.headers) {
+      const merged = new Headers(result.headers);
+      for (const [k, v] of Object.entries(baseHeaders)) {
+        if (!merged.has(k)) merged.set(k, v);
+      }
+      return new Response(result.body, {
+        status: result.status || 200,
+        headers: merged,
+      });
+    }
+    if (typeof result === 'string') {
+      return new Response(result, {
+        status: 200,
+        headers: { ...baseHeaders, 'Content-Type': 'text/plain; charset=UTF-8' },
+      });
+    }
+    return new Response(JSON.stringify(result ?? { ok: true }), {
+      status: 200,
+      headers: { ...baseHeaders, 'Content-Type': 'application/json; charset=UTF-8' },
+    });
+  } catch (err) {
+    return new Response(
+      JSON.stringify({
+        error: err && err.message ? err.message : 'Internal Serverless Function Error',
+        route: context.route,
+        deploymentId: context.deploymentId,
+      }),
+      {
+        status: 500,
+        headers: { ...baseHeaders, 'Content-Type': 'application/json; charset=UTF-8' },
+      }
+    );
+  }
 }
 
 async function handleRequest(request, event) {
@@ -151,6 +270,7 @@ async function handleRequest(request, event) {
         status: 404,
         headers: {
           'Content-Type': 'text/html; charset=UTF-8',
+          'X-MyShip-Engine': 'EdgeOne-CAS-Gateway/2.0-FullStack',
           'X-MyShip-Subdomain': subdomain,
         },
       }
@@ -160,23 +280,82 @@ async function handleRequest(request, event) {
   // 2. 读取不可变 Manifest 清单 (命中边缘内存则 0ms)
   const manifestHit = MANIFEST_CACHE.has(deploymentId);
   const manifest = await resolveManifest(deploymentId);
-  if (!manifest || !manifest.files) {
+  if (!manifest || (!manifest.files && !manifest.functions)) {
     return new Response(`Deployment Manifest Not Found: ${deploymentId}`, {
       status: 404,
       headers: { 'Content-Type': 'text/plain; charset=UTF-8' },
     });
   }
 
-  // 3. 匹配文件路径（支持目录自动补全 index.html 与 SPA History Fallback）
-  let reqPath = decodeURIComponent(url.pathname);
+  // 3. 优先匹配 Phase 2 约定式 Serverless 云函数 (`manifest.functions`)
+  const rawPathname = decodeURIComponent(url.pathname);
+  const normalizedRoute =
+    rawPathname.length > 1 && rawPathname.endsWith('/')
+      ? rawPathname.slice(0, -1)
+      : rawPathname;
+
+  const fnEntry = manifest.functions && manifest.functions[normalizedRoute];
+  if (fnEntry && fnEntry.sha256) {
+    const resolvedFn = await resolveServerlessModule(fnEntry.sha256);
+    if (!resolvedFn || !resolvedFn.mod) {
+      return new Response(
+        JSON.stringify({
+          error: `Serverless Function Blob Not Registered: ${fnEntry.sha256} (run 'myship setup-edge' to sync)`,
+          route: normalizedRoute,
+          deploymentId,
+        }),
+        {
+          status: 502,
+          headers: {
+            'Content-Type': 'application/json; charset=UTF-8',
+            'X-MyShip-Engine': 'EdgeOne-CAS-Gateway/2.0-FullStack',
+            'X-MyShip-Deployment-Id': deploymentId,
+          },
+        }
+      );
+    }
+
+    const query = {};
+    try {
+      if (url.search && url.search.length > 1) {
+        const pairs = url.search.slice(1).split('&');
+        for (let i = 0; i < pairs.length; i++) {
+          const idx = pairs[i].indexOf('=');
+          if (idx === -1) {
+            query[decodeURIComponent(pairs[i])] = '';
+          } else {
+            query[decodeURIComponent(pairs[i].slice(0, idx))] = decodeURIComponent(
+              pairs[i].slice(idx + 1)
+            );
+          }
+        }
+      }
+    } catch {}
+
+    const context = {
+      deploymentId,
+      subdomain,
+      project: manifest.project || 'default',
+      route: normalizedRoute,
+      sha256: fnEntry.sha256,
+      functionSha256: fnEntry.sha256,
+      url,
+      query,
+    };
+    return await invokeEdgeFunction(resolvedFn.mod, resolvedFn.mode, request, context);
+  }
+
+  // 4. 匹配静态文件路径（支持目录自动补全 index.html 与 SPA History Fallback）
+  let reqPath = rawPathname;
   if (reqPath.endsWith('/')) reqPath += 'index.html';
 
-  let fileEntry = manifest.files[reqPath];
+  const filesMap = manifest.files || {};
+  let fileEntry = filesMap[reqPath];
   if (!fileEntry && !reqPath.includes('.')) {
-    fileEntry = manifest.files[`${reqPath}/index.html`];
+    fileEntry = filesMap[`${reqPath}/index.html`];
   }
-  if (!fileEntry && manifest.spaFallback) {
-    fileEntry = manifest.files[manifest.spaFallback];
+  if (!fileEntry && manifest.spaFallback && !reqPath.startsWith('/api/')) {
+    fileEntry = filesMap[manifest.spaFallback];
   }
 
   if (!fileEntry) {
@@ -194,14 +373,14 @@ async function handleRequest(request, event) {
   const isHtml = contentType.includes('text/html');
   const etag = `"${sha256}"`;
 
-  // 4. 支持 ETag 条件请求 (304 Not Modified 零流量毫秒响应)
+  // 5. 支持 ETag 条件请求 (304 Not Modified 零流量毫秒响应)
   const ifNoneMatch = request.headers.get('if-none-match');
   if (ifNoneMatch && ifNoneMatch === etag) {
     return new Response(null, {
       status: 304,
       headers: {
         ETag: etag,
-        'X-MyShip-Engine': 'EdgeOne-CAS-Gateway/2.0',
+        'X-MyShip-Engine': 'EdgeOne-CAS-Gateway/2.0-FullStack',
         'X-MyShip-Deployment-Id': deploymentId,
         'X-MyShip-Cache': 'HIT-304',
         'Cache-Control': isHtml ? 'no-cache' : 'public, max-age=31536000, immutable',
@@ -211,7 +390,7 @@ async function handleRequest(request, event) {
 
   const rangeHeader = request.headers.get('range');
 
-  // 5. 若无 Range 分片请求且已驻留边缘节点内存，直接 0ms 从内存返回
+  // 6. 若无 Range 分片请求且已驻留边缘节点内存，直接 0ms 从内存返回
   if (!rangeHeader && BLOB_CACHE.has(sha256)) {
     const cachedBlob = BLOB_CACHE.get(sha256);
     return new Response(cachedBlob.bytes.slice(0), {
@@ -221,7 +400,7 @@ async function handleRequest(request, event) {
         'Content-Length': String(cachedBlob.size),
         ETag: etag,
         'Accept-Ranges': 'bytes',
-        'X-MyShip-Engine': 'EdgeOne-CAS-Gateway/2.0',
+        'X-MyShip-Engine': 'EdgeOne-CAS-Gateway/2.0-FullStack',
         'X-MyShip-Subdomain': subdomain,
         'X-MyShip-Deployment-Id': deploymentId,
         'X-MyShip-Blob-Sha256': sha256,
@@ -232,7 +411,7 @@ async function handleRequest(request, event) {
     });
   }
 
-  // 6. 从 COS CAS 池读取真实文件块 blobs/<sha256> (透传 Range 请求头支持视频 206 分片流)
+  // 7. 从 COS CAS 池读取真实文件块 blobs/<sha256> (透传 Range 请求头支持视频 206 分片流)
   const blobUrl = `${COS_ORIGIN}/blobs/${sha256}`;
   const fetchHeaders = {};
   if (rangeHeader) {
@@ -244,7 +423,6 @@ async function handleRequest(request, event) {
     return new Response(`502 CAS Blob Missing: ${sha256}`, { status: 502 });
   }
 
-  // 对中小型非分片资源 (< 900 KB) 写入边缘节点内存缓存，后续跨洋/跨区访问 0ms 直出
   if (!rangeHeader && (fileEntry.size || 0) > 0 && fileEntry.size <= MAX_CACHEABLE_BLOB_BYTES) {
     const arrBuf = await blobRes.arrayBuffer();
     if (BLOB_CACHE.size >= MAX_BLOB_CACHE_ITEMS) {
@@ -259,7 +437,7 @@ async function handleRequest(request, event) {
         'Content-Length': String(arrBuf.byteLength),
         ETag: etag,
         'Accept-Ranges': 'bytes',
-        'X-MyShip-Engine': 'EdgeOne-CAS-Gateway/2.0',
+        'X-MyShip-Engine': 'EdgeOne-CAS-Gateway/2.0-FullStack',
         'X-MyShip-Subdomain': subdomain,
         'X-MyShip-Deployment-Id': deploymentId,
         'X-MyShip-Blob-Sha256': sha256,
@@ -270,12 +448,11 @@ async function handleRequest(request, event) {
     });
   }
 
-  // 大文件或 206 Range 视频流分片响应：直接流式透传并保留 Content-Range / Content-Length
   const respHeaders = {
     'Content-Type': contentType,
     ETag: etag,
     'Accept-Ranges': 'bytes',
-    'X-MyShip-Engine': 'EdgeOne-CAS-Gateway/2.0',
+    'X-MyShip-Engine': 'EdgeOne-CAS-Gateway/2.0-FullStack',
     'X-MyShip-Subdomain': subdomain,
     'X-MyShip-Deployment-Id': deploymentId,
     'X-MyShip-Blob-Sha256': sha256,
@@ -296,5 +473,21 @@ async function handleRequest(request, event) {
 }
 
 addEventListener('fetch', (event) => {
-  event.respondWith(handleRequest(event.request, event));
+  event.respondWith(
+    handleRequest(event.request, event).catch((err) => {
+      return new Response(
+        JSON.stringify({
+          error: 'Edge Gateway Uncaught Exception',
+          message: err && err.message ? err.message : String(err),
+        }),
+        {
+          status: 500,
+          headers: {
+            'Content-Type': 'application/json; charset=UTF-8',
+            'X-MyShip-Engine': 'EdgeOne-CAS-Gateway/2.0-FullStack',
+          },
+        }
+      );
+    })
+  );
 });

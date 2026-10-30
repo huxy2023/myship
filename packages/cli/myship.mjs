@@ -121,7 +121,7 @@ function ensureStorageDirs(storageDir) {
   mkdirSync(resolve(storageDir, 'aliases'), { recursive: true });
 }
 
-function walkFiles(dir, baseDir = dir) {
+function walkFiles(dir, baseDir = dir, { excludeApiJs = true } = {}) {
   const results = [];
   for (const entry of readdirSync(dir)) {
     if (BLOCKED_DIRS.has(entry)) {
@@ -136,13 +136,209 @@ function walkFiles(dir, baseDir = dir) {
     const full = resolve(dir, entry);
     const stat = statSync(full);
     if (stat.isDirectory()) {
-      results.push(...walkFiles(full, baseDir));
+      results.push(...walkFiles(full, baseDir, { excludeApiJs }));
     } else if (stat.isFile()) {
       const relPath = '/' + relative(baseDir, full).split('\\').join('/');
+      if (
+        excludeApiJs &&
+        (relPath.startsWith('/api/') || relPath === '/api') &&
+        (relPath.endsWith('.js') || relPath.endsWith('.mjs'))
+      ) {
+        continue;
+      }
       results.push({ fullPath: full, relPath, size: stat.size });
     }
   }
   return results.sort((a, b) => a.relPath.localeCompare(b.relPath));
+}
+
+// ============================================================================
+// Phase 2: 约定式 Serverless 云函数 (`api/*.js`) 扫描器与 ESM 编译器
+// ============================================================================
+export const MYSHIP_FUNCTIONS_POOL_PATH = resolve(
+  dirname(MYSHIP_CONFIG_PATH),
+  'functions-pool.json'
+);
+
+export function normalizeApiRoute(relApiFile) {
+  let clean = String(relApiFile)
+    .split('\\')
+    .join('/')
+    .replace(/^\/+/, '')
+    .replace(/^api\/+/, '')
+    .replace(/\.(mjs|js)$/i, '');
+  if (clean === 'index' || clean === '') {
+    return '/api';
+  }
+  if (clean.endsWith('/index')) {
+    clean = clean.slice(0, -'/index'.length);
+  }
+  return `/api/${clean}`;
+}
+
+export function resolveApiDir(targetDir, cwd = process.cwd(), explicitApiDir = null) {
+  if (explicitApiDir) {
+    const absExplicit = resolve(cwd, explicitApiDir);
+    if (existsSync(absExplicit) && statSync(absExplicit).isDirectory()) {
+      return absExplicit;
+    }
+  }
+  const inTarget = resolve(targetDir, 'api');
+  if (existsSync(inTarget) && statSync(inTarget).isDirectory()) {
+    return inTarget;
+  }
+  const inCwd = resolve(cwd, 'api');
+  if (existsSync(inCwd) && statSync(inCwd).isDirectory()) {
+    return inCwd;
+  }
+  return null;
+}
+
+export function scanApiFunctions(apiDir) {
+  if (!apiDir || !existsSync(apiDir) || !statSync(apiDir).isDirectory()) {
+    return [];
+  }
+  const rawFiles = walkFiles(apiDir, apiDir, { excludeApiJs: false }).filter(
+    (f) => f.relPath.endsWith('.js') || f.relPath.endsWith('.mjs')
+  );
+  return rawFiles
+    .map((f) => {
+      const relSource = `api${f.relPath}`;
+      const route = normalizeApiRoute(f.relPath);
+      const sourceCode = readFileSync(f.fullPath, 'utf8');
+      return {
+        fullPath: f.fullPath,
+        relSource,
+        route,
+        size: f.size,
+        sourceCode,
+      };
+    })
+    .sort((a, b) => a.route.localeCompare(b.route));
+}
+
+export function transformEsmToFactorySource(sourceCode, label = 'api-fn') {
+  const transformed = String(sourceCode)
+    .replace(/export\s+default\s+async\s+function/g, '__exports.default = async function')
+    .replace(/export\s+default\s+function/g, '__exports.default = function')
+    .replace(/export\s+default\s+/g, '__exports.default = ')
+    .replace(
+      /export\s+async\s+function\s+([A-Za-z0-9_$]+)/g,
+      '__exports.$1 = async function $1'
+    )
+    .replace(/export\s+function\s+([A-Za-z0-9_$]+)/g, '__exports.$1 = function $1')
+    .replace(
+      /export\s+(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*=/g,
+      'const $1 = __exports.$1 ='
+    );
+
+  const factoryExpr = `(function() {\nconst __exports = {};\n${transformed}\nreturn __exports;\n})`;
+  try {
+    // 构建期静态语法校验，提前拦截函数语法错误
+    new Function(`return ${factoryExpr};`);
+  } catch (err) {
+    throw new Error(`云函数语法解析失败 (${label}): ${err.message}`);
+  }
+  return factoryExpr;
+}
+
+export function compileServerlessModule(sourceCode, label = 'api-fn') {
+  const factoryExpr = transformEsmToFactorySource(sourceCode, label);
+  const factory = new Function(`return ${factoryExpr}();`);
+  return factory();
+}
+
+export async function invokeServerlessModule(modExports, request, context = {}) {
+  const method = (request.method || 'GET').toUpperCase();
+  const baseHeaders = {
+    'access-control-allow-origin': '*',
+    'access-control-allow-methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
+    'access-control-allow-headers': 'Content-Type, Authorization, X-Requested-With',
+    'cache-control': 'no-store, no-cache, must-revalidate',
+    'x-myship-engine': 'EdgeOne-CAS-Gateway/2.0-FullStack',
+    'x-deployment-id': context.deploymentId || '',
+    'x-myship-deployment-id': context.deploymentId || '',
+    'x-subdomain-alias': context.subdomain || '',
+    'x-myship-subdomain': context.subdomain || '',
+    'x-myship-function-route': context.route || '',
+    'x-myship-function-sha256': context.sha256 || '',
+  };
+
+  if (method === 'OPTIONS' && typeof modExports?.OPTIONS !== 'function') {
+    return new Response(null, { status: 204, headers: baseHeaders });
+  }
+
+  const handler =
+    (modExports && typeof modExports[method] === 'function' && modExports[method]) ||
+    (modExports && typeof modExports.default === 'function' && modExports.default) ||
+    (modExports && typeof modExports.handler === 'function' && modExports.handler) ||
+    (typeof modExports === 'function' ? modExports : null);
+
+  if (!handler) {
+    return new Response(
+      JSON.stringify({
+        error: `Method ${method} Not Allowed or no default handler exported`,
+        route: context.route,
+        deploymentId: context.deploymentId,
+      }),
+      {
+        status: 405,
+        headers: { ...baseHeaders, 'content-type': 'application/json; charset=UTF-8' },
+      }
+    );
+  }
+
+  try {
+    const result = await handler(request, context);
+    if (result && typeof result === 'object' && typeof result.arrayBuffer === 'function' && result.headers) {
+      const mergedHeaders = new Headers(result.headers);
+      for (const [k, v] of Object.entries(baseHeaders)) {
+        if (!mergedHeaders.has(k)) mergedHeaders.set(k, v);
+      }
+      return new Response(result.body, {
+        status: result.status || 200,
+        headers: mergedHeaders,
+      });
+    }
+    if (typeof result === 'string') {
+      return new Response(result, {
+        status: 200,
+        headers: { ...baseHeaders, 'content-type': 'text/plain; charset=UTF-8' },
+      });
+    }
+    return new Response(JSON.stringify(result ?? { ok: true }), {
+      status: 200,
+      headers: { ...baseHeaders, 'content-type': 'application/json; charset=UTF-8' },
+    });
+  } catch (err) {
+    return new Response(
+      JSON.stringify({
+        error: err?.message || 'Internal Serverless Function Error',
+        route: context.route,
+        deploymentId: context.deploymentId,
+      }),
+      {
+        status: 500,
+        headers: { ...baseHeaders, 'content-type': 'application/json; charset=UTF-8' },
+      }
+    );
+  }
+}
+
+export function loadLocalFunctionsPool() {
+  try {
+    if (existsSync(MYSHIP_FUNCTIONS_POOL_PATH)) {
+      return JSON.parse(readFileSync(MYSHIP_FUNCTIONS_POOL_PATH, 'utf8')) || {};
+    }
+  } catch {
+    // ignore
+  }
+  return {};
+}
+
+export function saveLocalFunctionsPool(pool) {
+  mkdirSync(dirname(MYSHIP_FUNCTIONS_POOL_PATH), { recursive: true });
+  writeFileSync(MYSHIP_FUNCTIONS_POOL_PATH, JSON.stringify(pool, null, 2), 'utf8');
 }
 
 function sha256Hex(buffer) {
@@ -296,11 +492,17 @@ export function inferProjectFromRecord(item, fallback = 'default') {
 }
 
 // ============================================================================
-// 1. 本地模式 CAS 引擎 (离线沙盒验证)
+// 1. 本地模式 CAS 引擎 (离线沙盒验证，含 Phase 2 api/*.js 全栈支持)
 // ============================================================================
 export function deployDirectory(
   targetDir,
-  { storageDir = DEFAULT_STORAGE_DIR, aliases = [], project = 'default' } = {}
+  {
+    storageDir = DEFAULT_STORAGE_DIR,
+    aliases = [],
+    project = 'default',
+    cwd = process.cwd(),
+    apiDir = null,
+  } = {}
 ) {
   const absTarget = resolve(targetDir);
   if (!existsSync(absTarget)) {
@@ -309,13 +511,17 @@ export function deployDirectory(
   ensureStorageDirs(storageDir);
 
   const files = walkFiles(absTarget);
-  if (files.length === 0) {
+  const resolvedApiDir = resolveApiDir(absTarget, cwd, apiDir);
+  const apiFunctions = scanApiFunctions(resolvedApiDir);
+
+  if (files.length === 0 && apiFunctions.length === 0) {
     throw new Error(`目标目录为空: ${absTarget}`);
   }
 
   let uploadedBlobs = 0;
   let reusedBlobs = 0;
   const manifestFiles = {};
+  const manifestFunctions = {};
 
   for (const file of files) {
     const content = readFileSync(file.fullPath);
@@ -339,7 +545,41 @@ export function deployDirectory(
     };
   }
 
-  const treeSignature = JSON.stringify({ project, files: manifestFiles, ts: Date.now() });
+  for (const fn of apiFunctions) {
+    // 静态语法检查与 ESM 转换验证
+    transformEsmToFactorySource(fn.sourceCode, fn.relSource);
+    const content = Buffer.from(fn.sourceCode, 'utf8');
+    const hash = sha256Hex(content);
+    const blobPath = resolve(storageDir, 'blobs', hash);
+
+    if (existsSync(blobPath)) {
+      reusedBlobs++;
+      console.log(
+        `  ⚡ [API 函数 CAS 复用] ${fn.route} (${fn.relSource}) (sha256: ${hash.slice(0, 10)}...)`
+      );
+    } else {
+      writeFileSync(blobPath, content);
+      uploadedBlobs++;
+      console.log(
+        `  ⚡ [API 函数新块写入] ${fn.route} (${fn.relSource}) -> blobs/${hash.slice(0, 10)}... (${fn.size} B)`
+      );
+    }
+
+    manifestFunctions[fn.route] = {
+      sha256: hash,
+      entryBlob: hash,
+      runtime: 'edge-js',
+      size: fn.size,
+      source: fn.relSource,
+    };
+  }
+
+  const treeSignature = JSON.stringify({
+    project,
+    files: manifestFiles,
+    functions: manifestFunctions,
+    ts: Date.now(),
+  });
   const shortHash = sha256Hex(Buffer.from(treeSignature)).slice(0, 8);
   const deploymentId = `dpl_${shortHash}`;
   const immutableSubdomain =
@@ -352,6 +592,7 @@ export function deployDirectory(
     createdAt: new Date().toISOString(),
     stats: {
       totalFiles: files.length,
+      totalFunctions: apiFunctions.length,
       uploadedBlobs,
       reusedBlobs,
     },
@@ -361,6 +602,7 @@ export function deployDirectory(
       ? '/index.html'
       : null,
     files: manifestFiles,
+    functions: manifestFunctions,
   };
 
   const manifestPath = resolve(storageDir, 'manifests', `${deploymentId}.json`);
@@ -379,10 +621,13 @@ export function deployDirectory(
 
   console.log(`\n✅ 部署完成! [项目: ${project}] Deployment ID: ${deploymentId}`);
   console.log(
-    `   文件统计: 共 ${files.length} 个文件 (新增上传 ${uploadedBlobs} 个, CAS 复用 ${reusedBlobs} 个)`
+    `   资源统计: 静态文件 ${files.length} 个, 云函数 ${apiFunctions.length} 个 (新增块 ${uploadedBlobs} 个, CAS 复用 ${reusedBlobs} 个)`
   );
   for (const u of boundUrls) {
     console.log(`   🌐 访问地址: ${u}`);
+  }
+  for (const route of Object.keys(manifestFunctions)) {
+    console.log(`   ⚡ 云函数路由: ${boundUrls[0] || ''}${route}`);
   }
 
   return { deploymentId, immutableSubdomain, boundUrls, manifest };
@@ -449,11 +694,11 @@ export function listState({
 }
 
 // ============================================================================
-// 2. 腾讯云 COS + EdgeOne 云端模式 (默认生产模式)
+// 2. 腾讯云 COS + EdgeOne 云端模式 (默认生产模式，含 Phase 2 api/*.js 全栈支持)
 // ============================================================================
 export async function deployRemoteDirectory(
   targetDir,
-  { aliases = [], project = 'default', cwd = process.cwd() } = {}
+  { aliases = [], project = 'default', cwd = process.cwd(), apiDir = null } = {}
 ) {
   const { remoteDomain } = assertCloudEndpointsConfigured();
   const absTarget = resolve(targetDir);
@@ -462,16 +707,24 @@ export async function deployRemoteDirectory(
   }
 
   const files = walkFiles(absTarget);
-  if (files.length === 0) {
+  const resolvedApiDir = resolveApiDir(absTarget, cwd, apiDir);
+  const apiFunctions = scanApiFunctions(resolvedApiDir);
+
+  if (files.length === 0 && apiFunctions.length === 0) {
     throw new Error(`目标目录为空: ${absTarget}`);
   }
 
   console.log(`☁️  正在向腾讯云 COS 执行 CAS 去重部署... [项目命名空间: ${project}]`);
-  console.log(`📂 目标目录: ${absTarget} (共 ${files.length} 个文件)`);
+  console.log(
+    `📂 目标目录: ${absTarget} (静态文件: ${files.length} 个${
+      apiFunctions.length > 0 ? `, Serverless 云函数: ${apiFunctions.length} 个` : ''
+    })`
+  );
 
   let uploadedBlobs = 0;
   let reusedBlobs = 0;
   const manifestFiles = {};
+  const manifestFunctions = {};
 
   for (const file of files) {
     const content = readFileSync(file.fullPath);
@@ -497,7 +750,64 @@ export async function deployRemoteDirectory(
     };
   }
 
-  const treeSignature = JSON.stringify({ project, files: manifestFiles, ts: Date.now() });
+  const localPool = loadLocalFunctionsPool();
+  let newFunctionAdded = false;
+
+  for (const fn of apiFunctions) {
+    transformEsmToFactorySource(fn.sourceCode, fn.relSource);
+    const content = Buffer.from(fn.sourceCode, 'utf8');
+    const hash = sha256Hex(content);
+    const blobKey = `blobs/${hash}`;
+    const fnPoolKey = `functions/${hash}.json`;
+
+    const exists = await cosHeadObject(blobKey);
+    if (exists) {
+      reusedBlobs++;
+      console.log(
+        `  ⚡ [COS 云函数 CAS 复用] ${fn.route} (${fn.relSource}) (sha256: ${hash.slice(0, 10)}...)`
+      );
+    } else {
+      await cosPutObject(blobKey, content, 'application/javascript; charset=UTF-8');
+      uploadedBlobs++;
+      newFunctionAdded = true;
+      console.log(
+        `  ⬆️ [COS 云函数新块上传] ${fn.route} (${fn.relSource}) -> ${blobKey.slice(0, 16)}... (${fn.size} B)`
+      );
+    }
+
+    if (!localPool[hash]) {
+      newFunctionAdded = true;
+      const fnRecord = {
+        sha256: hash,
+        project,
+        route: fn.route,
+        source: fn.relSource,
+        code: fn.sourceCode,
+        updatedAt: new Date().toISOString(),
+      };
+      localPool[hash] = fnRecord;
+      await cosPutObject(fnPoolKey, JSON.stringify(fnRecord, null, 2), 'application/json; charset=UTF-8');
+    }
+
+    manifestFunctions[fn.route] = {
+      sha256: hash,
+      entryBlob: hash,
+      runtime: 'edge-js',
+      size: fn.size,
+      source: fn.relSource,
+    };
+  }
+
+  if (apiFunctions.length > 0) {
+    saveLocalFunctionsPool(localPool);
+  }
+
+  const treeSignature = JSON.stringify({
+    project,
+    files: manifestFiles,
+    functions: manifestFunctions,
+    ts: Date.now(),
+  });
   const shortHash = sha256Hex(Buffer.from(treeSignature)).slice(0, 8);
   const deploymentId = `dpl_${shortHash}`;
   const immutableSubdomain =
@@ -510,6 +820,7 @@ export async function deployRemoteDirectory(
     createdAt: new Date().toISOString(),
     stats: {
       totalFiles: files.length,
+      totalFunctions: apiFunctions.length,
       uploadedBlobs,
       reusedBlobs,
     },
@@ -519,6 +830,7 @@ export async function deployRemoteDirectory(
       ? '/index.html'
       : null,
     files: manifestFiles,
+    functions: manifestFunctions,
   };
 
   await cosPutObject(
@@ -526,6 +838,21 @@ export async function deployRemoteDirectory(
     JSON.stringify(manifest, null, 2),
     'application/json; charset=UTF-8'
   );
+
+  // 若本次部署包含新的 Serverless 云函数块，自动重新构建全局边缘函数并热更新至 EdgeOne
+  if (apiFunctions.length > 0 && newFunctionAdded) {
+    try {
+      const { code } = await syncCloudFunctionsPoolAndGenerateEdgeCode({ silent: true });
+      const teoRes = await deployEdgeFunctionToTeo({ code, remoteDomain });
+      console.log(
+        `  ⚡ [EdgeOne 全栈同步] 已将云函数版本池 (${Object.keys(manifestFunctions).join(', ')}) 自动编译同步至边缘节点 (${teoRes.functionId})`
+      );
+    } catch (err) {
+      console.log(
+        `  ℹ️  [云函数提示] 已将云函数写入 COS CAS 池 (blobs/<sha256>)；如需同步预编译池至 EdgeOne 可运行 \`myship setup-edge\` (${err.message})`
+      );
+    }
+  }
 
   const boundUrls = [];
   const allSubdomains = new Set([immutableSubdomain, ...aliases.map(normalizeSubdomain)]);
@@ -541,15 +868,20 @@ export async function deployRemoteDirectory(
     immutableSubdomain,
     aliases: [...allSubdomains],
     urls: boundUrls,
+    functions: Object.keys(manifestFunctions),
     createdAt: manifest.createdAt,
   });
 
   console.log(`\n✅ 云端部署完成! [项目: ${project}] Deployment ID: ${deploymentId}`);
   console.log(
-    `   文件统计: 共 ${files.length} 个文件 (COS 新增上传 ${uploadedBlobs} 个, CAS 复用 ${reusedBlobs} 个)`
+    `   资源统计: 静态文件 ${files.length} 个, 云函数 ${apiFunctions.length} 个 (COS 新增上传 ${uploadedBlobs} 个, CAS 复用 ${reusedBlobs} 个)`
   );
   for (const u of boundUrls) {
     console.log(`   🌐 线上访问地址: ${u}`);
+  }
+  for (const route of Object.keys(manifestFunctions)) {
+    const primaryUrl = boundUrls[boundUrls.length - 1] || boundUrls[0] || '';
+    console.log(`   ⚡ 云函数接口:   ${primaryUrl}${route}`);
   }
 
   return { deploymentId, immutableSubdomain, boundUrls, manifest };
@@ -680,8 +1012,11 @@ function printFormattedState({
       console.log(`  (当前项目 [${projectFilter}] 尚无部署记录，直接运行 \`myship\` 即可发布第一版)`);
     } else {
       for (const m of projManifests) {
+        const fnRoutes = m.functions ? Object.keys(m.functions) : [];
+        const fnSummary =
+          fnRoutes.length > 0 ? ` | 云函数:${fnRoutes.length} (${fnRoutes.join(', ')})` : '';
         console.log(
-          `  - ${m.id} (${m.immutableSubdomain}) | ${m.createdAt} | 文件:${m.stats.totalFiles} (新增:${m.stats.uploadedBlobs}, 复用:${m.stats.reusedBlobs})`
+          `  - ${m.id} (${m.immutableSubdomain}) | ${m.createdAt} | 文件:${m.stats.totalFiles}${fnSummary} (新增:${m.stats.uploadedBlobs}, 复用:${m.stats.reusedBlobs})`
         );
       }
     }
@@ -733,8 +1068,11 @@ function printFormattedState({
     console.log(`\n📦 ${title}`);
     console.log(`  🚀 历史构建版本 (${group.manifests.length} 个):`);
     for (const m of group.manifests) {
+      const fnRoutes = m.functions ? Object.keys(m.functions) : [];
+      const fnSummary =
+        fnRoutes.length > 0 ? ` | 云函数:${fnRoutes.length} (${fnRoutes.join(', ')})` : '';
       console.log(
-        `     - ${m.id} (${m.immutableSubdomain}) | ${m.createdAt} | 文件:${m.stats.totalFiles} (新增:${m.stats.uploadedBlobs}, 复用:${m.stats.reusedBlobs})`
+        `     - ${m.id} (${m.immutableSubdomain}) | ${m.createdAt} | 文件:${m.stats.totalFiles}${fnSummary} (新增:${m.stats.uploadedBlobs}, 复用:${m.stats.reusedBlobs})`
       );
     }
     console.log(`  🌐 绑定域名列表 (${group.aliases.length} 个):`);
@@ -781,7 +1119,54 @@ export async function listRemoteState({ projectFilter = null, showAll = false } 
 // ============================================================================
 // 3. 边缘函数代码生成器 (`myship build-edge-fn`) 与交互式登录 (`myship login`)
 // ============================================================================
-export function generateEdgeFunctionCode({ cosOrigin, outputPath, silent = false } = {}) {
+function buildPrecompiledFunctionsBlock(functionsPool = {}) {
+  const entries = [];
+  for (const [sha256, item] of Object.entries(functionsPool)) {
+    if (!item || !item.code) continue;
+    try {
+      const factoryExpr = transformEsmToFactorySource(
+        item.code,
+        item.source || item.route || sha256.slice(0, 8)
+      );
+      entries.push(`  "${sha256}": ${factoryExpr}(),`);
+    } catch {
+      // ignore invalid legacy pool item
+    }
+  }
+  return entries.join('\n');
+}
+
+export async function syncCloudFunctionsPoolAndGenerateEdgeCode({
+  cosOrigin,
+  outputPath,
+  silent = false,
+} = {}) {
+  const localPool = loadLocalFunctionsPool();
+  try {
+    const fnKeys = await cosListKeys('functions/');
+    for (const key of fnKeys) {
+      if (!key.endsWith('.json')) continue;
+      const hash = basename(key, '.json');
+      if (!localPool[hash]) {
+        const remoteItem = await cosGetJson(key);
+        if (remoteItem && remoteItem.code) {
+          localPool[hash] = remoteItem;
+        }
+      }
+    }
+    saveLocalFunctionsPool(localPool);
+  } catch {
+    // 若离线或无权限列出 functions/，直接使用本地缓存池
+  }
+  return generateEdgeFunctionCode({ cosOrigin, outputPath, silent, functionsPool: localPool });
+}
+
+export function generateEdgeFunctionCode({
+  cosOrigin,
+  outputPath,
+  silent = false,
+  functionsPool = null,
+} = {}) {
   const effective = getEffectiveEndpoints();
   const targetCosOrigin = (cosOrigin || effective.cosOrigin || '').replace(/\/$/, '');
   if (!targetCosOrigin) {
@@ -790,9 +1175,14 @@ export function generateEdgeFunctionCode({ cosOrigin, outputPath, silent = false
     );
   }
 
+  const pool = functionsPool || loadLocalFunctionsPool();
+  const precompiledBlock = buildPrecompiledFunctionsBlock(pool);
+
   const templatePath = resolve(__dirname, '../edge-gateway/edgeone-function.template.js');
   const templateContent = readFileSync(templatePath, 'utf8');
-  const rendered = templateContent.replace(/__MYSHIP_COS_ORIGIN__/g, targetCosOrigin);
+  const rendered = templateContent
+    .replace(/__MYSHIP_COS_ORIGIN__/g, targetCosOrigin)
+    .replace('/* __MYSHIP_PRECOMPILED_FUNCTIONS__ */', precompiledBlock);
 
   // 全局边缘函数属于用户云底座全局设施（1 个云函数服务全部项目），默认存放在 ~/.myship/edgeone-function.dist.js，绝不污染具体业务项目目录
   const outFile = outputPath ? resolve(outputPath) : MYSHIP_GLOBAL_EDGE_FN_PATH;
@@ -803,15 +1193,22 @@ export function generateEdgeFunctionCode({ cosOrigin, outputPath, silent = false
   writeFileSync(outFile, rendered, 'utf8');
 
   if (!silent) {
+    const fnCount = Object.keys(pool).length;
     console.log(`✅ 已生成全局 EdgeOne 边缘函数代码 (全账号仅需 1 个函数，所有项目共享):`);
     console.log(`   📄 全局路径: ${outFile}`);
     console.log(`   ☁️  绑定 COS: ${targetCosOrigin}`);
+    if (fnCount > 0) {
+      console.log(`   ⚡ 内置预编译云函数版本块: ${fnCount} 个 (0ms 原生 V8 执行)`);
+    }
   }
   return { outFile, targetCosOrigin, code: rendered };
 }
 
 async function promptAndDeployEdgeFunction({ cosOrigin, remoteDomain, rlExternal = null } = {}) {
-  const { outFile, code } = generateEdgeFunctionCode({ cosOrigin, silent: false });
+  const { outFile, code } = await syncCloudFunctionsPoolAndGenerateEdgeCode({
+    cosOrigin,
+    silent: false,
+  });
   const effective = getEffectiveEndpoints();
   const domain = remoteDomain || effective.remoteDomain || 'ship.example.com';
 

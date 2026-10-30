@@ -386,9 +386,52 @@ ${parsedDocs.map((d) => `- [${d.title}](https://myship.ship.onehub.top${d.rawPat
   const indexHtml = generateSiteHtml(parsedDocs, allSearchEntries, mcpConfig);
   writeFileSync(resolve(DIST_DIR, 'index.html'), indexHtml, 'utf-8');
 
+  // 生成 Phase 2 约定式 Serverless 云函数 (api/hello.js 与 api/status.js)
+  const apiDir = resolve(DIST_DIR, 'api');
+  mkdirSync(apiDir, { recursive: true });
+  const apiHelloSource = `/**
+ * api/hello.js — MyShip Phase 2 约定式边缘 Serverless 云函数在线示例
+ * 自动映射路由: GET / POST https://<subdomain>/api/hello
+ */
+export async function GET(request, context) {
+  const url = new URL(request.url);
+  const name = url.searchParams.get('name') || 'MyShip Pioneer';
+
+  return {
+    ok: true,
+    phase: 'Phase 2 · Convention-Based Serverless Functions (api/*.js)',
+    message: \`⚡ Hello, \${name}! Executed at Edge V8 Isolate with 0ms atomic version binding.\`,
+    runtime: 'EdgeOne-CAS-Gateway/2.0 (V8 Isolate)',
+    project: context.project,
+    subdomain: context.subdomain,
+    deploymentId: context.deploymentId,
+    route: context.route,
+    functionSha256: context.functionSha256,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+export async function POST(request, context) {
+  let body = {};
+  try {
+    body = await request.json();
+  } catch {}
+  return {
+    ok: true,
+    method: 'POST',
+    received: body,
+    deploymentId: context.deploymentId,
+    functionSha256: context.functionSha256,
+    timestamp: new Date().toISOString(),
+  };
+}
+`;
+  writeFileSync(resolve(apiDir, 'hello.js'), apiHelloSource, 'utf-8');
+
   console.log(`✅ MyShip 开源版门户与 Clarify 风格文档站构建完成！输出目录: ${DIST_DIR}`);
   console.log(`   - 页面文档数: ${parsedDocs.length} 篇 (${parsedDocs.map((d) => d.shortTitle).join(' / ')})`);
   console.log(`   - AI 原始文档: ${parsedDocs.map((d) => d.rawPath).join(', ')}`);
+  console.log(`   - 边缘云函数:  /api/hello (约定式 api/hello.js)`);
   console.log(`   - LLM 索引:    /llms.txt, /llms-full.txt, /mcp.json`);
 }
 
@@ -967,8 +1010,9 @@ function generateSiteHtml(parsedDocs, searchEntries, mcpConfig) {
             </div>
             <div class="terminal-tabs">
               <button type="button" class="term-tab active" data-term-tab="deploy">1. 零参数发布</button>
-              <button type="button" class="term-tab" data-term-tab="namespace">2. 项目命名空间</button>
-              <button type="button" class="term-tab" data-term-tab="rollback">3. 0秒原子回滚</button>
+              <button type="button" class="term-tab" data-term-tab="serverless">2. 全栈云函数</button>
+              <button type="button" class="term-tab" data-term-tab="namespace">3. 命名空间</button>
+              <button type="button" class="term-tab" data-term-tab="rollback">4. 0秒原子回滚</button>
             </div>
           </div>
           <div class="terminal-body" id="terminal-screen"></div>
@@ -994,6 +1038,29 @@ function generateSiteHtml(parsedDocs, searchEntries, mcpConfig) {
           <div class="stat-val">0 依赖</div>
           <div class="stat-label">纯 Node.js 原生实现，100% 掌控在自己的云账号下</div>
         </div>
+      </div>
+
+      <div class="section-head" style="margin-top: 12px;">
+        <h2>⚡ 在线实测：Phase 2 约定式边缘 Serverless 云函数 (<code>api/hello.js</code>)</h2>
+        <p>本门户站已内置 <code>api/hello.js</code> 并随静态构建一同封入当前 <code>dpl_&lt;id&gt;</code> 快照。点击下方按钮直接向当前泛域名边缘网关发起真实请求：</p>
+      </div>
+
+      <div style="margin: 18px 0 48px; padding: 20px 24px; border-radius: var(--radius-md); border: 1px solid var(--accent-border); background: var(--bg-subtle); display: flex; flex-direction: column; gap: 14px;">
+        <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px;">
+          <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; color: var(--text-strong);">
+            <span style="padding: 3px 8px; border-radius: 5px; background: var(--accent-soft); color: var(--accent); font-weight: 700; margin-right: 8px;">GET</span>
+            <code>/api/hello?name=EdgeDeveloper</code>
+          </div>
+          <div style="display: flex; gap: 10px;">
+            <button type="button" class="btn-primary" id="btn-test-api-hello" style="padding: 8px 16px; font-size: 0.85rem;">
+              <span>⚡ 立即调用边缘函数 (/api/hello)</span>
+            </button>
+            <a href="/api/hello?name=BrowserVisitor" target="_blank" rel="noopener" class="btn-secondary" style="padding: 8px 14px; font-size: 0.85rem; text-decoration: none;">
+              <span>新窗口打开 JSON ↗</span>
+            </a>
+          </div>
+        </div>
+        <pre id="api-hello-output" style="padding: 14px 16px; border-radius: 8px; background: #0b101b; color: #34d399; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; overflow-x: auto; line-height: 1.55; border: 1px solid #1e293b;">// 点击上方「立即调用边缘函数」查看实时返回的 JSON 与 X-MyShip-Function-Sha256 诊断头...</pre>
       </div>
 
       <div class="section-head" style="margin-top: 48px;">
@@ -1198,16 +1265,28 @@ function generateSiteHtml(parsedDocs, searchEntries, mcpConfig) {
     }
 
     const TERM_SCENES = {
-      deploy: \`<span class="t-dim"># 在任意前端项目中直接输入 6 个字母:</span>
+      deploy: \`<span class="t-dim"># 在任意全栈项目中直接输入 6 个字母 (自动扫描静态产物 + api/*.js):</span>
 <span class="t-cmd">$ myship</span>
 📁 已自动读取项目命名空间配置: .myship/project.json [项目: app1]
 ☁️  正在向腾讯云 COS 执行 CAS 去重部署... [项目命名空间: app1]
   ⚡ [COS CAS 命中跳过] /assets/vendor.js (sha256: 6f3ffee9d9...)
   ⬆️ [COS 新块上传]     /index.html -> blobs/5adc23fa1d... (2,194 B)
+  ⚡ [Serverless 新函数上传] /api/hello <- api/hello.js (sha256: 36908c5530...)
 
 <span class="t-ok">✅ 云端部署完成! [项目: app1] Deployment ID: dpl_6e46ed99</span>
    🌐 构建快照域名: <span class="t-url">https://app1-6e46ed99.ship.example.com</span>
-   🌐 项目默认主域: <span class="t-url">https://app1.ship.example.com</span>\`,
+   🌐 项目默认主域: <span class="t-url">https://app1.ship.example.com</span>
+   ⚡ 边缘函数路由: <span class="t-url">https://app1.ship.example.com/api/hello</span>\`,
+      serverless: \`<span class="t-dim"># 编写 api/hello.js 自动映射为 /api/hello，与前端页面绑定同一 dpl_&lt;id&gt; 快照:</span>
+<span class="t-cmd">$ curl -i https://app1.ship.example.com/api/hello</span>
+HTTP/2 200 
+content-type: application/json; charset=UTF-8
+x-myship-deployment-id: dpl_6e46ed99
+x-myship-function-route: /api/hello
+x-myship-function-sha256: 36908c5530bc8c08d80172b5f351835b79aa273b...
+x-myship-function-mode: PRECOMPILED-V8
+
+<span class="t-ok">{"ok":true,"version":"v1","deploymentId":"dpl_6e46ed99","route":"/api/hello"}</span>\`,
       namespace: \`<span class="t-dim"># 在 app1 目录下执行 myship ls，默认仅展示当前项目的版本与域名:</span>
 <span class="t-cmd">$ myship ls</span>
 === 📦 当前项目命名空间: [app1] (云端全局 CAS 唯一块: 6 个) ===
@@ -1337,6 +1416,29 @@ function generateSiteHtml(parsedDocs, searchEntries, mcpConfig) {
     document.getElementById('hero-copy-cmd').addEventListener('click', () => {
       copyText('npm i -g @myship/cli && myship login', '✅ 已复制安装与登录命令');
     });
+
+    const btnTestApi = document.getElementById('btn-test-api-hello');
+    const apiOutput = document.getElementById('api-hello-output');
+    if (btnTestApi && apiOutput) {
+      btnTestApi.addEventListener('click', async () => {
+        apiOutput.textContent = '⏳ 正在请求边缘云函数 GET /api/hello?name=EdgeDeveloper ...';
+        const t0 = performance.now();
+        try {
+          const res = await fetch('/api/hello?name=EdgeDeveloper');
+          const elapsed = Math.round(performance.now() - t0);
+          const data = await res.json();
+          const headersInfo = [
+            \`// HTTP \${res.status} (\${elapsed} ms)\`,
+            \`// X-MyShip-Deployment-Id: \${res.headers.get('x-myship-deployment-id') || '-'}\`,
+            \`// X-MyShip-Function-Sha256: \${res.headers.get('x-myship-function-sha256') || '-'}\`,
+            \`// X-MyShip-Function-Mode: \${res.headers.get('x-myship-function-mode') || '-'}\`,
+          ].join('\\n');
+          apiOutput.textContent = headersInfo + '\\n' + JSON.stringify(data, null, 2);
+        } catch (err) {
+          apiOutput.textContent = '// 请求失败: ' + err.message;
+        }
+      });
+    }
 
     document.querySelectorAll('[data-copy-target]').forEach(btn => {
       btn.addEventListener('click', () => {

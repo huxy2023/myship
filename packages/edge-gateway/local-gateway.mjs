@@ -1,13 +1,20 @@
 /**
- * local-gateway.mjs — 本地 4100 端口泛域名动态 Host 模拟边缘路由网关
+ * local-gateway.mjs — 本地 4100 端口泛域名动态 Host 模拟边缘路由网关 (Phase 2 全栈版)
  *
- * 无需任何云端账号，本地即可通过 http://<subdomain>.ship.localhost:4100 体验完整路由与 0 秒切流。
+ * 无需任何云端账号，本地即可通过 http://<subdomain>.ship.localhost:4100
+ * 体验静态资源 + 约定式云函数 (api/*.js) 的同版本原子切流与 0 秒回滚。
  */
 import http from 'node:http';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DEFAULT_STORAGE_DIR } from '../cli/myship.mjs';
+import {
+  DEFAULT_STORAGE_DIR,
+  compileServerlessModule,
+  invokeServerlessModule,
+} from '../cli/myship.mjs';
+
+const LOCAL_FN_CACHE = new Map(); // sha256 -> compiled module exports
 
 export function createLocalStorageAdapter(storageDir = DEFAULT_STORAGE_DIR) {
   return {
@@ -52,10 +59,55 @@ export async function handleEdgeRequest(request, adapter = createLocalStorageAda
     );
   }
 
-  let reqPath = url.pathname === '/' ? '/index.html' : url.pathname;
-  let fileMeta = manifest.files[reqPath];
+  // 1. 优先匹配 Phase 2 约定式 Serverless 云函数路由 (manifest.functions)
+  const rawPathname = decodeURIComponent(url.pathname);
+  const normalizedRoute =
+    rawPathname.length > 1 && rawPathname.endsWith('/')
+      ? rawPathname.slice(0, -1)
+      : rawPathname;
 
-  if (!fileMeta && manifest.spaFallback && !reqPath.includes('.')) {
+  const fnMeta = manifest.functions && manifest.functions[normalizedRoute];
+  if (fnMeta && fnMeta.sha256) {
+    let modExports = LOCAL_FN_CACHE.get(fnMeta.sha256);
+    if (!modExports) {
+      const fnBlob = await adapter.getBlob(fnMeta.sha256);
+      if (!fnBlob) {
+        return new Response(
+          JSON.stringify({
+            error: `500 Function Blob Missing: ${fnMeta.sha256}`,
+            deploymentId,
+          }),
+          { status: 500, headers: { 'content-type': 'application/json; charset=UTF-8' } }
+        );
+      }
+      modExports = compileServerlessModule(
+        fnBlob.toString('utf8'),
+        fnMeta.source || normalizedRoute
+      );
+      LOCAL_FN_CACHE.set(fnMeta.sha256, modExports);
+    }
+
+    const context = {
+      deploymentId,
+      subdomain,
+      project: manifest.project || 'default',
+      route: normalizedRoute,
+      sha256: fnMeta.sha256,
+      url,
+      query: Object.fromEntries(url.searchParams),
+    };
+    return await invokeServerlessModule(modExports, request, context);
+  }
+
+  // 2. 匹配静态文件路由 (manifest.files) 与 SPA History Fallback
+  let reqPath = rawPathname === '/' ? '/index.html' : rawPathname;
+  if (reqPath.endsWith('/')) reqPath += 'index.html';
+
+  let fileMeta = manifest.files[reqPath];
+  if (!fileMeta && !reqPath.includes('.')) {
+    fileMeta = manifest.files[`${reqPath}/index.html`];
+  }
+  if (!fileMeta && manifest.spaFallback && !reqPath.includes('.') && !reqPath.startsWith('/api/')) {
     reqPath = manifest.spaFallback;
     fileMeta = manifest.files[reqPath];
   }
@@ -100,9 +152,21 @@ export function startLocalEdgeGateway({ port = 4100, storageDir = DEFAULT_STORAG
   const adapter = createLocalStorageAdapter(storageDir);
   const server = http.createServer(async (req, res) => {
     const host = req.headers.host || `localhost:${port}`;
+    const method = (req.method || 'GET').toUpperCase();
+    let bodyBuf = undefined;
+    if (method !== 'GET' && method !== 'HEAD') {
+      const chunks = [];
+      for await (const chunk of req) {
+        chunks.push(chunk);
+      }
+      if (chunks.length > 0) {
+        bodyBuf = Buffer.concat(chunks);
+      }
+    }
     const webReq = new Request(`http://${host}${req.url}`, {
-      method: req.method,
+      method,
       headers: req.headers,
+      body: bodyBuf,
     });
     const webRes = await handleEdgeRequest(webReq, adapter);
     res.statusCode = webRes.status;
@@ -113,7 +177,7 @@ export function startLocalEdgeGateway({ port = 4100, storageDir = DEFAULT_STORAG
 
   return new Promise((resolvePromise) => {
     server.listen(port, () => {
-      console.log(`🌐 本地泛域名边缘网关已启动: http://*.ship.localhost:${port}`);
+      console.log(`🌐 本地泛域名全栈边缘网关已启动: http://*.ship.localhost:${port}`);
       resolvePromise(server);
     });
   });

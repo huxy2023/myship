@@ -23,20 +23,21 @@
 ```mermaid
 flowchart LR
     P0["✅ Phase 0 (已完成)<br/>CAS 核心引擎 + EdgeOne 泛域名 HTTPS"] --> P1["✅ Phase 1 (已完成)<br/>.myship 项目命名空间 + 免依赖全局 CLI + Clarify 文档站"]
-    P1 --> P2["⚡ Phase 2 (中期规划)<br/>约定式云函数 (api/*.js) 与前后端同版本原子切换"]
+    P1 --> P2["✅ Phase 2 (已完成)<br/>约定式云函数 (api/*.js) 与前后端同版本原子切换"]
     P2 --> P3["🌐 Phase 3 (远期规划)<br/>Git PR 预览机器人 + Web 可视化控制台 + CAS GC"]
 ```
 
 ---
 
-## 三、Phase 2 详细设计：约定式 Serverless 云函数与全栈版本隔离
+## 三、Phase 2 架构实现（已上线）：约定式 Serverless 云函数与全栈版本隔离
 
-当后续需要在项目中运行后端 API 接口或轻量服务时，无需改动现有的 DNS、泛域名 HTTPS 证书或 CAS 存储池，只需在不可变的 `manifest` 契约中扩展 `functions` 路由表：
+在项目中运行后端 API 接口或轻量服务时，无需改动现有的 DNS、泛域名 HTTPS 证书或 CAS 存储池，`MyShip` 通过扩展不可变的 `manifest` 契约与边缘 V8 预编译池，实现了零配置全栈部署：
 
 1. **约定式后端目录 (`api/*.js`)**：
-   - 在业务项目中编写 `api/hello.js`（标准 Web `Request -> Response` 签名）。
-2. **函数代码同样进入 CAS 内容寻址池**：
-   - `myship` 在扫描静态文件的同时，将 `api/*.js` 打包后同样作为不可变 Blob 存入 `blobs/<sha256>`（或投递至云函数版本池）。
+   - 在业务项目中编写 `api/hello.js`（支持标准 Web `export default async function(request, context)` 或按 HTTP 方法导出 `GET` / `POST` / `PUT` / `DELETE`）。
+2. **函数代码同样进入 CAS 内容寻址池与边缘 V8 预编译注册表**：
+   - `myship` 在扫描静态文件的同时，自动扫描 `api/**/*.{js,mjs}`，计算代码内容的 `SHA-256` 哈希并存入 `blobs/<sha256>` 与 `functions/<sha256>.json`。
+   - 同时将不同历史版本的函数代码以 `sha256` 为唯一键编译进边缘网关的 `PRECOMPILED_FN_REGISTRY`（零 `eval` CSP 风险，0ms 原生 V8 直接调用）。
    - 在 `manifests/dpl_<id>.json` 中记录前后端一体的版本快照：
      ```json
      {
@@ -45,8 +46,9 @@ flowchart LR
        "files": { "/index.html": { "sha256": "..." } },
        "functions": {
          "/api/hello": {
-           "runtime": "edge-js",
-           "entryBlob": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+           "sha256": "36908c5530bc8c08d80172b5f351835b79aa273b2beaf5531a136264dc73602b",
+           "entryFile": "api/hello.js",
+           "runtime": "edge-js"
          }
        }
      }
