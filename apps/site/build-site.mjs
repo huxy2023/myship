@@ -430,10 +430,75 @@ export async function POST(request, context) {
 `;
   writeFileSync(resolve(apiDir, 'hello.js'), apiHelloSource, 'utf-8');
 
+  const apiInspectSource = `/**
+ * api/inspect.js — MyShip Phase 2 边缘环境探针与 Web Crypto 签名实测函数
+ * 采用腾讯云 EdgeOne 官方推荐的 onRequestGet(context) / onRequestPost(context) 签名
+ * 自动映射路由: GET / POST https://<subdomain>/api/inspect
+ */
+export async function onRequestGet(context) {
+  const { request, query, clientIp, geo, deploymentId, subdomain, project, route, functionSha256 } = context;
+  const payloadText = \`\${project}:\${subdomain}:\${deploymentId}:\${clientIp}:\${ query.seed || 'edgeone-v8' }\`;
+
+  // 使用 EdgeOne V8 原生支持的 Web Crypto API (crypto.subtle) 计算 SHA-256 边缘签名
+  const encoded = new TextEncoder().encode(payloadText);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', encoded);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  const edgeSignature = hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+
+  return Response.json({
+    ok: true,
+    functionName: 'api/inspect.js',
+    signatureStyle: 'EdgeOne Official onRequestGet(context)',
+    route,
+    deployment: {
+      project,
+      subdomain,
+      deploymentId,
+      functionSha256,
+    },
+    edgeWebCrypto: {
+      algorithm: 'SHA-256 (crypto.subtle.digest)',
+      inputSeed: payloadText,
+      digestHex: edgeSignature,
+    },
+    v8Capabilities: {
+      webCryptoSubtle: typeof crypto !== 'undefined' && typeof crypto.subtle !== 'undefined',
+      responseJsonShim: typeof Response.json === 'function',
+      cachesApi: typeof caches !== 'undefined',
+      textEncoder: typeof TextEncoder !== 'undefined',
+    },
+    clientNetwork: {
+      clientIp: clientIp || 'unknown',
+      userAgent: request.headers.get('user-agent') || '',
+      acceptLanguage: request.headers.get('accept-language') || '',
+      geo: geo && Object.keys(geo).length > 0 ? geo : undefined,
+    },
+    timestamp: new Date().toISOString(),
+  });
+}
+
+export async function onRequestPost(context) {
+  let body = {};
+  try {
+    body = await context.request.json();
+  } catch {}
+  return Response.json({
+    ok: true,
+    functionName: 'api/inspect.js',
+    signatureStyle: 'EdgeOne Official onRequestPost(context)',
+    receivedBody: body,
+    deploymentId: context.deploymentId,
+    functionSha256: context.functionSha256,
+    timestamp: new Date().toISOString(),
+  });
+}
+`;
+  writeFileSync(resolve(apiDir, 'inspect.js'), apiInspectSource, 'utf-8');
+
   console.log(`✅ MyShip 开源版门户与 Clarify 风格文档站构建完成！输出目录: ${DIST_DIR}`);
   console.log(`   - 页面文档数: ${parsedDocs.length} 篇 (${parsedDocs.map((d) => d.shortTitle).join(' / ')})`);
   console.log(`   - AI 原始文档: ${parsedDocs.map((d) => d.rawPath).join(', ')}`);
-  console.log(`   - 边缘云函数:  /api/hello (约定式 api/hello.js)`);
+  console.log(`   - 边缘云函数:  /api/hello (api/hello.js), /api/inspect (api/inspect.js)`);
   console.log(`   - LLM 索引:    /llms.txt, /llms-full.txt, /mcp.json`);
 }
 
@@ -1043,26 +1108,30 @@ function generateSiteHtml(parsedDocs, searchEntries, mcpConfig) {
       </div>
 
       <div class="section-head" style="margin-top: 12px;">
-        <h2>⚡ 在线实测：Phase 2 约定式边缘 Serverless 云函数 (<code>api/hello.js</code>)</h2>
-        <p>本门户站已内置 <code>api/hello.js</code> 并随静态构建一同封入当前 <code>dpl_&lt;id&gt;</code> 快照。点击下方按钮直接向当前泛域名边缘网关发起真实请求：</p>
+        <h2>⚡ 在线实测：Phase 2 约定式边缘 Serverless 云函数 (<code>api/*.js</code>)</h2>
+        <p>本门户站已内置 2 个云函数（Web 标准签名的 <code>api/hello.js</code> 与 EdgeOne 官方 <code>onRequestGet</code> + Web Crypto 签名的 <code>api/inspect.js</code>），点击下方按钮直接发起真实边缘请求：</p>
       </div>
 
       <div style="margin: 18px 0 48px; padding: 20px 24px; border-radius: var(--radius-md); border: 1px solid var(--accent-border); background: var(--bg-subtle); display: flex; flex-direction: column; gap: 14px;">
         <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px;">
-          <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; color: var(--text-strong);">
-            <span style="padding: 3px 8px; border-radius: 5px; background: var(--accent-soft); color: var(--accent); font-weight: 700; margin-right: 8px;">GET</span>
-            <code>/api/hello?name=EdgeDeveloper</code>
+          <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.84rem; color: var(--text-strong); display: flex; flex-wrap: wrap; gap: 10px; align-items: center;">
+            <span><span style="padding: 3px 8px; border-radius: 5px; background: var(--accent-soft); color: var(--accent); font-weight: 700; margin-right: 6px;">FN 1</span><code>/api/hello</code></span>
+            <span style="color: var(--text-faint);">|</span>
+            <span><span style="padding: 3px 8px; border-radius: 5px; background: var(--accent-soft); color: var(--accent); font-weight: 700; margin-right: 6px;">FN 2</span><code>/api/inspect</code></span>
           </div>
-          <div style="display: flex; gap: 10px;">
-            <button type="button" class="btn-primary" id="btn-test-api-hello" style="padding: 8px 16px; font-size: 0.85rem;">
-              <span>⚡ 立即调用边缘函数 (/api/hello)</span>
+          <div style="display: flex; flex-wrap: wrap; gap: 10px;">
+            <button type="button" class="btn-primary" id="btn-test-api-hello" style="padding: 8px 15px; font-size: 0.84rem;">
+              <span>⚡ 调用 /api/hello</span>
             </button>
-            <a href="/api/hello?name=BrowserVisitor" target="_blank" rel="noopener" class="btn-secondary" style="padding: 8px 14px; font-size: 0.85rem; text-decoration: none;">
+            <button type="button" class="btn-primary" id="btn-test-api-inspect" style="padding: 8px 15px; font-size: 0.84rem; background: var(--accent); color: #fff;">
+              <span>🔍 调用 /api/inspect (EdgeOne 探针 + WebCrypto)</span>
+            </button>
+            <a href="/api/inspect?seed=live-check" target="_blank" rel="noopener" class="btn-secondary" style="padding: 8px 14px; font-size: 0.84rem; text-decoration: none;">
               <span>新窗口打开 JSON ↗</span>
             </a>
           </div>
         </div>
-        <pre id="api-hello-output" style="padding: 14px 16px; border-radius: 8px; background: #0b101b; color: #34d399; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; overflow-x: auto; line-height: 1.55; border: 1px solid #1e293b;">// 点击上方「立即调用边缘函数」查看实时返回的 JSON 与 X-MyShip-Function-Sha256 诊断头...</pre>
+        <pre id="api-hello-output" style="padding: 14px 16px; border-radius: 8px; background: #0b101b; color: #34d399; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; overflow-x: auto; line-height: 1.55; border: 1px solid #1e293b;">// 点击上方「调用 /api/hello」或「调用 /api/inspect」查看实时返回的 JSON 与 X-MyShip-Function-Sha256 诊断头...</pre>
       </div>
 
       <div class="section-head" style="margin-top: 48px;">
@@ -1420,26 +1489,33 @@ x-myship-function-mode: PRECOMPILED-V8
     });
 
     const btnTestApi = document.getElementById('btn-test-api-hello');
+    const btnTestInspect = document.getElementById('btn-test-api-inspect');
     const apiOutput = document.getElementById('api-hello-output');
-    if (btnTestApi && apiOutput) {
-      btnTestApi.addEventListener('click', async () => {
-        apiOutput.textContent = '⏳ 正在请求边缘云函数 GET /api/hello?name=EdgeDeveloper ...';
-        const t0 = performance.now();
-        try {
-          const res = await fetch('/api/hello?name=EdgeDeveloper');
-          const elapsed = Math.round(performance.now() - t0);
-          const data = await res.json();
-          const headersInfo = [
-            \`// HTTP \${res.status} (\${elapsed} ms)\`,
-            \`// X-MyShip-Deployment-Id: \${res.headers.get('x-myship-deployment-id') || '-'}\`,
-            \`// X-MyShip-Function-Sha256: \${res.headers.get('x-myship-function-sha256') || '-'}\`,
-            \`// X-MyShip-Function-Mode: \${res.headers.get('x-myship-function-mode') || '-'}\`,
-          ].join('\\n');
-          apiOutput.textContent = headersInfo + '\\n' + JSON.stringify(data, null, 2);
-        } catch (err) {
-          apiOutput.textContent = '// 请求失败: ' + err.message;
-        }
-      });
+    async function runLiveApiTest(endpoint) {
+      if (!apiOutput) return;
+      apiOutput.textContent = \`⏳ 正在请求边缘云函数 GET \${endpoint} ...\`;
+      const t0 = performance.now();
+      try {
+        const res = await fetch(endpoint);
+        const elapsed = Math.round(performance.now() - t0);
+        const data = await res.json();
+        const headersInfo = [
+          \`// HTTP \${res.status} (\${elapsed} ms) | Endpoint: \${endpoint}\`,
+          \`// X-MyShip-Deployment-Id:   \${res.headers.get('x-myship-deployment-id') || '-'}\`,
+          \`// X-MyShip-Function-Route:  \${res.headers.get('x-myship-function-route') || '-'}\`,
+          \`// X-MyShip-Function-Sha256: \${res.headers.get('x-myship-function-sha256') || '-'}\`,
+          \`// X-MyShip-Function-Mode:   \${res.headers.get('x-myship-function-mode') || '-'}\`,
+        ].join('\\n');
+        apiOutput.textContent = headersInfo + '\\n' + JSON.stringify(data, null, 2);
+      } catch (err) {
+        apiOutput.textContent = '// 请求失败: ' + err.message;
+      }
+    }
+    if (btnTestApi) {
+      btnTestApi.addEventListener('click', () => runLiveApiTest('/api/hello?name=EdgeDeveloper'));
+    }
+    if (btnTestInspect) {
+      btnTestInspect.addEventListener('click', () => runLiveApiTest('/api/inspect?seed=portal-live'));
     }
 
     document.querySelectorAll('[data-copy-target]').forEach(btn => {
