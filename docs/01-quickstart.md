@@ -134,13 +134,12 @@ myship alias v2 dpl_6e46ed99
 
 ### 1. 编写你的第一个云函数 (`api/hello.js`)
 
-支持标准的 Web `Request -> Response` 默认导出，也支持按 HTTP 方法导出（`GET` / `POST` / `PUT` / `DELETE`），可直接返回普通 JSON 对象：
+同时兼容 **Web / Vercel 标准导出 (`GET` / `POST` / `default`)** 与 **腾讯云 EdgeOne 官方导出 (`onRequest` / `onRequestGet` / `onRequestPost`)**，可直接返回普通 JSON 对象或 `Response` 实例，并自动注入 EdgeOne 原生的客户端 IP 与地理位置信息 (`context.geo` / `context.clientIp`)：
 
 ```javascript
-// api/hello.js -> 自动映射为 https://<你的子域名>/api/hello
+// 写法 A：Web / Next.js 风格命名导出 (api/hello.js -> https://<子域名>/api/hello)
 export async function GET(request, context) {
-  const url = new URL(request.url);
-  const name = url.searchParams.get('name') || 'MyShip Developer';
+  const name = context.query.name || 'MyShip Developer';
 
   return {
     ok: true,
@@ -149,7 +148,19 @@ export async function GET(request, context) {
     deploymentId: context.deploymentId, // 与当前前端页面严格同源的构建版本 ID
     subdomain: context.subdomain,
     functionSha256: context.functionSha256,
+    clientIp: context.clientIp,         // 自动透传 EdgeOne request.eo.clientIp
+    geo: context.geo,                   // 自动透传 EdgeOne 国家/省份/城市/运营商信息
     timestamp: new Date().toISOString(),
+  };
+}
+
+// 写法 B：腾讯云 EdgeOne 官方 onRequest* 签名（同样原生支持）
+export async function onRequestPost(context) {
+  const body = await context.request.json();
+  return {
+    ok: true,
+    received: body,
+    deploymentId: context.deploymentId,
   };
 }
 ```

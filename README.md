@@ -101,8 +101,24 @@ myship -d v2
 # 查看当前项目命名空间下的历史版本与线上域名（加 --all 查看全量项目分组）
 myship ls
 
-# 0 秒将当前项目主域名一键回退到上一个历史版本
+# 0 秒将当前项目主域名一键回退到上一个历史版本（前端页面与 /api/* 云函数同帧原子回退！）
 myship rollback
+```
+
+### 第 5 步：（Phase 2 全栈能力）零配置编写 `api/*.js` 边缘 Serverless 云函数
+
+在你的项目目录下新建 `api/hello.js`，下次执行 `myship` 时会自动将其打包进当前构建版本的 `dpl_<id>` 快照并同步至 EdgeOne 边缘节点（同时支持 Web 标准 `GET(request, context)` 与 EdgeOne 官方 `onRequestGet(context)` 签名）：
+
+```javascript
+// api/hello.js -> 自动映射为 https://app1.ship.example.com/api/hello
+export async function GET(request, context) {
+  return {
+    ok: true,
+    message: `Hello from ${context.subdomain} (${context.deploymentId})!`,
+    clientIp: context.clientIp, // 自动透传 EdgeOne 客户端真实 IP
+    geo: context.geo,           // 自动透传 EdgeOne 国家/省份/城市/运营商地理信息
+  };
+}
 ```
 
 ---

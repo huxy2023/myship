@@ -16,11 +16,12 @@
 
 ```mermaid
 flowchart LR
-    Req["浏览器请求<br/>https://app1-v2.ship.example.com/index.html"] --> Edge["EdgeOne 边缘函数网关<br/>(myship-cas-router)"]
-    Edge -- "1. 提取 Host 子域名 (app1-v2)<br/>实时读取 (no-cache)" --> Alias["COS: aliases/app1-v2.json<br/>{ deploymentId: 'dpl_4f788e9d' }"]
-    Alias -- "2. 定位不可变版本清单" --> Manifest["COS: manifests/dpl_4f788e9d.json<br/>{ '/index.html': { sha256: '5adc23...' } }"]
-    Manifest -- "3. 按内容哈希寻址" --> Blob["COS: blobs/5adc23fa1d...<br/>(真实文件内容块)"]
-    Blob -- "4. 注入 Content-Type 与诊断头返回" --> Req
+    Req["浏览器请求<br/>https://app1-v2.ship.example.com/*"] --> Edge["EdgeOne 边缘函数网关<br/>(EdgeOne-CAS-Gateway/2.0-FullStack)"]
+    Edge -- "1. 解析子域名 (ALIAS_CACHE SWR)" --> Alias["COS: aliases/app1-v2.json<br/>{ deploymentId: 'dpl_4f788e9d' }"]
+    Alias -- "2. 定位全栈清单 (MANIFEST_CACHE)" --> Manifest["COS: manifests/dpl_4f788e9d.json<br/>{ files: {...}, functions: {...} }"]
+    Manifest -- "3a. 命中 /api/* 路由 (0ms)" --> V8Fn["边缘 V8 预编译池<br/>PRECOMPILED_FN_REGISTRY[sha256]"]
+    Manifest -- "3b. 命中静态文件路径" --> Blob["边缘 BLOB_CACHE (8MB) /<br/>COS: blobs/<sha256>"]
+    V8Fn & Blob -- "4. 注入诊断头与分级缓存返回" --> Req
 ```
 
 ---
@@ -100,6 +101,10 @@ flowchart LR
 1. 若请求路径精确命中 `manifest.files[reqPath]`（如 `/assets/app.js`），直接返回对应文件块；
 2. 若未命中且请求路径不含文件扩展名（如 `/users/profile`），边缘网关会自动回退读取构建产物中的 `/200.html` 或 `/index.html`，让前端路由无缝接管，绝不会出现刷新页面报 `404` 的问题。
 
-### 2. 智能分级缓存头 (`Cache-Control`)
-- **HTML 入口文件 (`text/html`)**：自动注入 `Cache-Control: no-cache, no-store, must-revalidate`，确保每次执行 `myship rollback` 或发布新版后，用户刷新浏览器立刻看到最新页面。
-- **静态资源文件 (JS / CSS / 图片 / 字体)**：自动注入 `Cache-Control: public, max-age=3600`（本地网关为 `immutable`），充分利用边缘节点与浏览器缓存加速加载。
+### 2. 智能分级缓存头 (`Cache-Control`)、V8 内存加速与流式分片 (`Range 206`)
+- **三级 V8 Isolate 内存缓存**：
+  - `MANIFEST_CACHE`：由于 `manifests/dpl_<id>.json` 永久不可变，首次读取后常驻边缘节点 V8 内存（0ms 命中）。
+  - `BLOB_CACHE`：对 `<= 256 KB` 的高频静态文件（如 `index.html`、图标、核心脚本）采用 `Uint8Array` 零拷贝视图驻留内存，并严格受 **`8 MB` 总字节账本**保护（远低于 EdgeOne `128 MB` 内存红线）。
+  - `ALIAS_CACHE`（SWR 异步刷新）：子域名指针在内存中提供毫秒级响应，同时利用 `event.waitUntil()` 在后台异步刷新。
+- **ETag 条件请求 (`304 Not Modified`)**：天然复用文件的 `SHA-256` 哈希作为强 `ETag`，浏览器二次刷新时在边缘直接返回 `304`，0 字节回源。
+- **大文件与 `<video>` 流式分片 (`HTTP 206 Partial Content`)**：自动向 COS 透传 `Range` 请求头并返回 `206 Partial Content` 与 `Content-Range`，实现高清长视频进度条任意拖拽秒开。
