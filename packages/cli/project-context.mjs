@@ -283,11 +283,24 @@ export function detectProjectContext(cwd = process.cwd(), explicitProject = null
         }
       : null;
 
+  const resources =
+    savedCfg?.resources && typeof savedCfg.resources === 'object'
+      ? {
+          ...(savedCfg.resources.storage && typeof savedCfg.resources.storage === 'object'
+            ? { storage: { ...savedCfg.resources.storage } }
+            : {}),
+          ...(savedCfg.resources.db && typeof savedCfg.resources.db === 'object'
+            ? { db: { ...savedCfg.resources.db } }
+            : {}),
+        }
+      : null;
+
   return {
     project,
     buildDir: buildDir || './dist',
     prodDomain,
     backend,
+    resources,
     hasSavedConfig: Boolean(savedCfg),
     configSource: configSource || '自动推断 (package.json / 目录名)',
     projectJsonPath,
@@ -305,6 +318,12 @@ export function ensureProjectConfig(cwd = process.cwd(), overrides = {}) {
       : ctx.backend
       ? { ...ctx.backend }
       : undefined;
+  const nextResources =
+    overrides.resources !== undefined
+      ? overrides.resources
+      : ctx.resources && Object.keys(ctx.resources).length > 0
+      ? { ...ctx.resources }
+      : undefined;
   const payload = {
     project: nextProject,
     dir: overrides.dir || ctx.buildDir || './dist',
@@ -314,6 +333,7 @@ export function ensureProjectConfig(cwd = process.cwd(), overrides = {}) {
       ? normalizeDomainToken(overrides.project)
       : ctx.prodDomain,
     ...(nextBackend ? { backend: nextBackend } : {}),
+    ...(nextResources && Object.keys(nextResources).length > 0 ? { resources: nextResources } : {}),
     updatedAt: new Date().toISOString(),
   };
   writeFileSync(ctx.projectJsonPath, JSON.stringify(payload, null, 2), 'utf8');

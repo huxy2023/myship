@@ -24,8 +24,16 @@ import {
   resolveBackendEntry,
   bundleScfBackend,
   createLocalPersistentStorage,
+  createLocalFileStorage,
+  createDatabaseClient,
+  closeDatabasePools,
   dispatchFullStackModule,
 } from './scf-bundler.mjs';
+import {
+  resolveProjectResourceEnv,
+  MANAGED_STORAGE_ENV_KEYS,
+  MANAGED_DB_ENV_KEYS,
+} from './resource-manager.mjs';
 
 function resolveSafeStaticFile(staticRoot, reqPath) {
   if (!staticRoot || !existsSync(staticRoot)) return null;
@@ -116,6 +124,41 @@ export function createDevRequestHandler({
         : rawPathname;
 
     const projCtx = detectProjectContext(cwd, cleanProj);
+
+    // 本地模拟预签名文件直传/下载接口 (/_myship_files/<project>/<key>)
+    if (rawPathname.startsWith(`/_myship_files/${cleanProj}/`)) {
+      const fileKey = rawPathname.slice(`/_myship_files/${cleanProj}/`.length);
+      const fileEnv = {
+        ...process.env,
+        ...resolveProjectResourceEnv(cwd, cleanProj, storageDir),
+        ...loadDevProjectEnv(cleanProj, cwd, storageDir),
+      };
+      const localFiles = createLocalFileStorage(cwd, cleanProj, fileEnv);
+      const method = (request.method || 'GET').toUpperCase();
+      if (method === 'PUT' || method === 'POST') {
+        const bodyBuf = Buffer.from(await request.arrayBuffer());
+        const contentType = request.headers.get('content-type') || 'application/octet-stream';
+        const saved = await localFiles.put(fileKey, bodyBuf, { contentType });
+        return new Response(JSON.stringify({ ok: true, ...saved }), {
+          status: 200,
+          headers: { 'content-type': 'application/json; charset=UTF-8' },
+        });
+      }
+      if (method === 'GET' || method === 'HEAD') {
+        const buf = await localFiles.get(fileKey);
+        if (!buf) {
+          return new Response('404 File Not Found', { status: 404 });
+        }
+        return new Response(method === 'HEAD' ? null : buf, {
+          status: 200,
+          headers: {
+            'content-type': buf.contentType || 'application/octet-stream',
+            'content-length': String(buf.length),
+          },
+        });
+      }
+    }
+
     const scfBackendEnabled = Boolean(projCtx.backend && projCtx.backend.enabled);
     const serverEntry = resolveBackendEntry(
       cwd,
@@ -148,10 +191,41 @@ export function createDevRequestHandler({
         return new Response(null, { status: 204, headers: baseHeaders });
       }
 
-      const projectEnv = loadDevProjectEnv(cleanProj, cwd, storageDir);
+      const resourceEnv = resolveProjectResourceEnv(cwd, cleanProj, storageDir);
+      const projectEnv = {
+        ...resourceEnv,
+        ...loadDevProjectEnv(cleanProj, cwd, storageDir),
+      };
+      for (const k of [...MANAGED_STORAGE_ENV_KEYS, ...MANAGED_DB_ENV_KEYS]) {
+        if (!(k in projectEnv)) {
+          delete process.env[k];
+        }
+      }
       Object.assign(process.env, projectEnv);
-      const storage = createLocalPersistentStorage(cwd, cleanProj);
+      const mergedEnv = {
+        MYSHIP_DEV_ORIGIN: url.origin,
+        ...process.env,
+        ...projectEnv,
+      };
+      const storage = createLocalPersistentStorage(cwd, cleanProj, mergedEnv);
+      const files = createLocalFileStorage(cwd, cleanProj, mergedEnv);
+      const prov = String(mergedEnv.MYSHIP_DB_PROVIDER || '').toLowerCase();
+      const isSqliteProv =
+        !prov ||
+        prov === 'sqlite' ||
+        prov === 'turso' ||
+        prov === 'libsql' ||
+        prov === 'd1' ||
+        prov === 'cloudflare-d1';
+      const db = createDatabaseClient({
+        cwd,
+        project: cleanProj,
+        env: mergedEnv,
+        preferLocalSqlite: isSqliteProv,
+      });
       globalThis.myshipStorage = storage;
+      globalThis.myshipFiles = files;
+      globalThis.myshipDb = db;
       if (typeof process.setSourceMapsEnabled === 'function') {
         process.setSourceMapsEnabled(true);
       }
@@ -186,8 +260,11 @@ export function createDevRequestHandler({
           pathname: rawPathname,
           url,
           query: Object.fromEntries(url.searchParams),
-          env: { ...process.env, ...projectEnv },
+          env: mergedEnv,
           storage,
+          files,
+          bucket: files,
+          db,
           clientIp: request.headers.get('x-forwarded-for') || '127.0.0.1',
         };
 
@@ -243,7 +320,11 @@ export function createDevRequestHandler({
     const fnMeta = apiFunctions.find((f) => f.route === normalizedRoute);
 
     if (fnMeta) {
-      const projectEnv = loadDevProjectEnv(cleanProj, cwd, storageDir);
+      const resourceEnv = resolveProjectResourceEnv(cwd, cleanProj, storageDir);
+      const projectEnv = {
+        ...resourceEnv,
+        ...loadDevProjectEnv(cleanProj, cwd, storageDir),
+      };
       const fnHash = sha256Hex(Buffer.from(fnMeta.sourceCode, 'utf8'));
 
       if (fnMeta.upstreamUrl) {
@@ -340,6 +421,18 @@ export function createDevRequestHandler({
         cityName: 'Localhost',
         cisp: 'MyShip-Dev-Simulator',
       };
+      const devEnvWithOrigin = {
+        MYSHIP_DEV_ORIGIN: url.origin,
+        ...projectEnv,
+      };
+      const storage = createLocalPersistentStorage(cwd, cleanProj, devEnvWithOrigin);
+      const files = createLocalFileStorage(cwd, cleanProj, devEnvWithOrigin);
+      const db = createDatabaseClient({
+        cwd,
+        project: cleanProj,
+        env: devEnvWithOrigin,
+        preferLocalSqlite: true,
+      });
       const context = {
         deploymentId: 'dpl_dev_live',
         subdomain: cleanProj,
@@ -349,6 +442,10 @@ export function createDevRequestHandler({
         url,
         query: Object.fromEntries(url.searchParams),
         env: projectEnv,
+        storage,
+        files,
+        bucket: files,
+        db,
         geo: (request && request.eo && request.eo.geo) || defaultGeo,
         clientIp: request.headers.get('x-forwarded-for') || '127.0.0.1',
       };
@@ -443,23 +540,35 @@ export function startDevServer({
     console.log(`  [${new Date().toLocaleTimeString()}] ${method} ${req.url} -> ${webRes.status} (${elapsed}ms)`);
   });
 
+  server.on('close', () => {
+    closeDatabasePools(cleanProj).catch(() => {});
+  });
+
   return new Promise((resolvePromise, rejectPromise) => {
     server.on('error', rejectPromise);
     server.listen(port, () => {
+      const actualPort = server.address()?.port || port;
+      const projCtx = detectProjectContext(cwd, cleanProj);
+      const serverEntry = resolveBackendEntry(cwd, resolvedStaticRoot, projCtx.backend?.entry || null);
       const resolvedApi = resolveApiDir(resolvedStaticRoot, cwd, apiDir);
       const apiFns = scanApiFunctions(resolvedApi);
-      const envVars = loadDevProjectEnv(cleanProj, cwd, storageDir);
+      const resourceEnv = resolveProjectResourceEnv(cwd, cleanProj, storageDir);
+      const envVars = { ...resourceEnv, ...loadDevProjectEnv(cleanProj, cwd, storageDir) };
       console.log('==============================================================');
       console.log(`⚡ MyShip Dev — 本地全栈即时开发服务器已启动 (免打包实时热加载)`);
       console.log(`   🏷️  当前项目: [${cleanProj}]`);
       console.log(`   📁 静态目录: ${resolvedStaticRoot}`);
       console.log(
-        `   ⚡ API 路由: ${
-          apiFns.length > 0 ? apiFns.map((f) => f.route).join(', ') : '(尚未检测到 api/*.js)'
+        `   ⚡ 后端路由: ${
+          serverEntry
+            ? `${serverEntry.relEntry} (SCF 全栈入口)`
+            : apiFns.length > 0
+            ? apiFns.map((f) => f.route).join(', ')
+            : '(尚未检测到 server/index.mjs 或 api/*.js)'
         }`
       );
-      console.log(`   🔐 环境变量: 已加载 ${Object.keys(envVars).length} 项 (.env / myship env)`);
-      console.log(`   🌐 本地访问: http://localhost:${port}`);
+      console.log(`   🔐 环境变量: 已加载 ${Object.keys(envVars).length} 项 (.env / myship env / myship use)`);
+      console.log(`   🌐 本地访问: http://localhost:${actualPort}`);
       console.log('==============================================================');
       resolvePromise(server);
     });

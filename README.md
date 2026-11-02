@@ -175,6 +175,36 @@ myship logs --error
 - **独立持久化存储 (`context.storage`)**：内置 `await context.storage.get(key)` / `set(key, val)`（云端私有存储于 COS `data/<project>/<key>.json`，`ACL: private`），应用代码执行 `myship rollback` 回滚时仅切换代码版本，**绝不清空或回滚业务持久化数据**。需要使用长期 AK/SK 凭证、显式配置 `MYSHIP_DATA_SECRET_ID` / `MYSHIP_DATA_SECRET_KEY` 或配置 `backend.role` 运行角色（拒绝将短期过期的临时会话 Token 固化进云函数）。
 - **不可变版本隔离与保留规则**：每个部署版本绑定独立的 SCF 不可变版本（`Version 1`, `Version 2`），新旧预览域名各自访问对应版本后端；每个项目云端保留 **当前活跃别名（含回滚版本）+ 最近最多 5 个历史预览版本（总计上限 8 个版本）**，超出窗口的旧预览版本自动联动回收其 SCF 触发器、版本与历史 `manifest`。
 
+### 第 7 步：（v0.3+ 声明式云资源）`myship use` 交互式接入多引擎数据库与对象文件存储
+
+无需记忆冗长参数，在任意项目根目录直接运行 `myship use` 即可通过交互式菜单（`↑`/`↓` 方向键或数字键选择）为当前项目一键开通并注入对象存储（`context.files`）或 Serverless 数据库（`context.db`）：
+
+```bash
+# 1. 启动交互式云资源引导向导（推荐：选择优于输入，自动扫描账号下已有 CloudBase PG / Turso / Neon 底座）
+myship use
+
+# 2. 也可使用非交互式命令一键绑定（首次配置全局凭证后，后续所有新项目零参数自动建库/分 Schema）：
+myship use storage                         # 注册二进制文件存储 (files/<project>/ + 预签名直传 URL)
+myship use db --provider pg                # 腾讯云 CloudBase PG / 原生 PG (自动创建 myship_<project> Schema)
+myship use db --provider neon              # Neon Serverless PG (支持 API Key 自动建库 + 连接串多 Schema 隔离)
+myship use db --provider turso             # Turso Edge SQLite (自动识别组织、初始化默认 Group 并签发项目 Token)
+myship use db --provider d1                # Cloudflare D1 Serverless SQLite (自动查找或创建 D1 数据库)
+myship use db --provider mysql             # 原生 MySQL 8 / TDSQL-C (自动创建 myship_<project> 独立库)
+```
+
+在后端代码（`server/index.mjs` 或 `api/*.js`）中直接通过 `context.db` 与 `context.files` 调用，或使用标准 `pg.Pool` / `mysql2/promise` / `drizzle-orm` 直连注入的 `process.env.DATABASE_URL`：
+
+```javascript
+// 1. 统一 SQL 客户端 (本地 myship dev 默认映射至 Node 22+ 原生 node:sqlite .myship/data/<project>/local.sqlite)
+await context.db.execute('CREATE TABLE IF NOT EXISTS notes (id SERIAL PRIMARY KEY, title TEXT)');
+await context.db.execute('INSERT INTO notes (title) VALUES ($1)', ['Hello MyShip v0.3']);
+const rows = await context.db.query('SELECT * FROM notes');
+
+// 2. 二进制文件存储与前端预签名直传 (COS files/<project>/ 隔离)
+await context.files.put('uploads/readme.txt', 'Hello COS Files!', { contentType: 'text/plain' });
+const uploadUrl = await context.files.presignUrl('uploads/avatar.png', { method: 'PUT', expiresIn: 900 });
+```
+
 ---
 
 ## 📦 Monorepo 工程结构 (`pnpm workspace`)

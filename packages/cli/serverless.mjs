@@ -644,6 +644,47 @@ export async function runEnvCommand({
       : await getRemoteProjectEnv(cleanProj);
     const nextVars = { ...currentVars, ...pairs };
 
+    // 当用户通过 `myship env set` 更新 DATABASE_URL / NEON_DATABASE_URL / MYSQL_URL 时，自动同步派生的拆解变量，防止新 URL 与旧 PGHOST/PGPASSWORD 混用
+    const newPgUrl = pairs.DATABASE_URL || pairs.NEON_DATABASE_URL || '';
+    if (/^postgres(ql)?:\/\//i.test(newPgUrl)) {
+      try {
+        const parsed = new URL(newPgUrl);
+        if (!('PGHOST' in pairs)) nextVars.PGHOST = parsed.hostname;
+        if (!('PGPORT' in pairs)) nextVars.PGPORT = parsed.port || '5432';
+        if (!('PGDATABASE' in pairs)) {
+          nextVars.PGDATABASE = (parsed.pathname || '').replace(/^\/+/, '') || 'postgres';
+        }
+        if (!('PGUSER' in pairs)) nextVars.PGUSER = decodeURIComponent(parsed.username || '');
+        if (!('PGPASSWORD' in pairs)) {
+          nextVars.PGPASSWORD = decodeURIComponent(parsed.password || '');
+        }
+        if (pairs.DATABASE_URL && currentVars.NEON_DATABASE_URL && !('NEON_DATABASE_URL' in pairs)) {
+          nextVars.NEON_DATABASE_URL = pairs.DATABASE_URL;
+        }
+        if (pairs.NEON_DATABASE_URL && currentVars.DATABASE_URL && !('DATABASE_URL' in pairs)) {
+          nextVars.DATABASE_URL = pairs.NEON_DATABASE_URL;
+        }
+      } catch {
+        // ignore invalid URL
+      }
+    }
+    const newMysqlUrl = pairs.MYSQL_URL || pairs.DATABASE_URL || '';
+    if (/^mysql:\/\//i.test(newMysqlUrl)) {
+      try {
+        const parsed = new URL(newMysqlUrl);
+        const dbName = (parsed.pathname || '').replace(/^\/+/, '');
+        if (dbName && !('MYSQL_DATABASE' in pairs)) nextVars.MYSQL_DATABASE = dbName;
+        if (pairs.DATABASE_URL && currentVars.MYSQL_URL && !('MYSQL_URL' in pairs)) {
+          nextVars.MYSQL_URL = pairs.DATABASE_URL;
+        }
+        if (pairs.MYSQL_URL && currentVars.DATABASE_URL && !('DATABASE_URL' in pairs)) {
+          nextVars.DATABASE_URL = pairs.MYSQL_URL;
+        }
+      } catch {
+        // ignore invalid URL
+      }
+    }
+
     if (isLocal) {
       saveLocalProjectEnv(cleanProj, nextVars, storageDir);
       console.log(

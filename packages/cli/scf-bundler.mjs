@@ -10,9 +10,11 @@
  */
 import { existsSync, statSync, readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { resolve, relative, dirname, extname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { deflateRawSync } from 'node:zlib';
 import { createRequire } from 'node:module';
 import { walkFiles, normalizeDomainToken } from './project-context.mjs';
+import { executeCloudBasePgSql } from './cos-client.mjs';
 import { normalizeApiRoute, resolveApiDir, invokeServerlessModule as dispatchEdgeModule } from './serverless.mjs';
 
 function parsePackageNameFromNodeModulesPath(relPath) {
@@ -129,9 +131,13 @@ export function resolveBackendEntry(cwd = process.cwd(), targetDir = null, expli
  * 本地开发模式 (myship dev / --local) 下的持久化数据存储实现
  * 落盘在 <cwd>/.myship/data/<project>/<key>.json，与代码版本解耦
  */
-export function createLocalPersistentStorage(cwd = process.cwd(), project = 'default') {
+export function createLocalPersistentStorage(cwd = process.cwd(), project = 'default', env = process.env) {
   const cleanProj = normalizeDomainToken(project) || 'default';
-  const baseDir = resolve(cwd, '.myship', 'data', cleanProj);
+  const rawStorageEnv = env?.MYSHIP_STORAGE_ENV ? normalizeDomainToken(env.MYSHIP_STORAGE_ENV) : '';
+  const envSub = rawStorageEnv && rawStorageEnv !== 'prod' ? rawStorageEnv : '';
+  const baseDir = envSub
+    ? resolve(cwd, '.myship', 'data', cleanProj, envSub)
+    : resolve(cwd, '.myship', 'data', cleanProj);
 
   function sanitizeKey(key) {
     const clean = String(key || '')
@@ -201,6 +207,886 @@ export function createLocalPersistentStorage(cwd = process.cwd(), project = 'def
       return all.sort();
     },
   };
+}
+
+/**
+ * 本地开发模式 (myship dev / --local) 下的二进制对象存储实现 (context.files / context.bucket)
+ * 落盘在 <cwd>/.myship/files/<project>/<env?>/<key>，与云端 COS files/<project>/ 100% 同构
+ */
+export function createLocalFileStorage(cwd = process.cwd(), project = 'default', env = process.env) {
+  const cleanProj = normalizeDomainToken(project) || 'default';
+  const rawStorageEnv = env?.MYSHIP_STORAGE_ENV ? normalizeDomainToken(env.MYSHIP_STORAGE_ENV) : '';
+  const envSub = rawStorageEnv && rawStorageEnv !== 'prod' ? rawStorageEnv : '';
+  const baseDir = envSub
+    ? resolve(cwd, '.myship', 'files', cleanProj, envSub)
+    : resolve(cwd, '.myship', 'files', cleanProj);
+
+  function sanitizeFileKey(key) {
+    const clean = String(key || '')
+      .trim()
+      .replace(/^\/+|\/+$/g, '')
+      .replace(/\\/g, '/')
+      .replace(/[^a-zA-Z0-9._/-]/g, '_');
+    if (!clean || clean.includes('..') || clean.endsWith('.__meta__.json')) {
+      throw new Error(`无效的对象存储文件 Key: ${key}`);
+    }
+    return clean;
+  }
+
+  function toBuffer(body) {
+    if (Buffer.isBuffer(body)) return body;
+    if (body instanceof Uint8Array) return Buffer.from(body);
+    if (body instanceof ArrayBuffer) return Buffer.from(new Uint8Array(body));
+    return Buffer.from(String(body ?? ''), 'utf8');
+  }
+
+  return {
+    prefix: envSub ? `files/${cleanProj}/${envSub}/` : `files/${cleanProj}/`,
+    async put(key, body, options = {}) {
+      const safe = sanitizeFileKey(key);
+      const filePath = resolve(baseDir, safe);
+      const metaPath = `${filePath}.__meta__.json`;
+      mkdirSync(dirname(filePath), { recursive: true });
+      const buf = toBuffer(body);
+      const contentType = options.contentType || 'application/octet-stream';
+      writeFileSync(filePath, buf);
+      writeFileSync(
+        metaPath,
+        JSON.stringify(
+          {
+            key: safe,
+            project: cleanProj,
+            contentType,
+            size: buf.length,
+            updatedAt: new Date().toISOString(),
+          },
+          null,
+          2
+        ),
+        'utf8'
+      );
+      return { key: safe, size: buf.length, contentType };
+    },
+    async get(key, options = {}) {
+      const safe = sanitizeFileKey(key);
+      const filePath = resolve(baseDir, safe);
+      if (!existsSync(filePath)) return null;
+      const buf = readFileSync(filePath);
+      const metaPath = `${filePath}.__meta__.json`;
+      let contentType = 'application/octet-stream';
+      if (existsSync(metaPath)) {
+        try {
+          const meta = JSON.parse(readFileSync(metaPath, 'utf8'));
+          if (meta && meta.contentType) contentType = meta.contentType;
+        } catch {
+          // ignore
+        }
+      }
+      if (options.type === 'text') return buf.toString('utf8');
+      if (options.type === 'json') return JSON.parse(buf.toString('utf8'));
+      buf.contentType = contentType;
+      buf.size = buf.length;
+      return buf;
+    },
+    async delete(key) {
+      const safe = sanitizeFileKey(key);
+      const filePath = resolve(baseDir, safe);
+      const metaPath = `${filePath}.__meta__.json`;
+      if (existsSync(filePath)) rmSync(filePath, { force: true });
+      if (existsSync(metaPath)) rmSync(metaPath, { force: true });
+      return true;
+    },
+    async list(prefix = '') {
+      if (!existsSync(baseDir)) return [];
+      const cleanPrefix = String(prefix || '').replace(/^\/+/, '');
+      const all = [];
+      function walk(dir, relPrefix = '') {
+        for (const item of readdirSync(dir)) {
+          if (item.endsWith('.__meta__.json')) continue;
+          const full = resolve(dir, item);
+          const st = statSync(full);
+          if (st.isDirectory()) {
+            walk(full, `${relPrefix}${item}/`);
+          } else {
+            const k = `${relPrefix}${item}`;
+            if (!cleanPrefix || k.startsWith(cleanPrefix)) {
+              all.push(k);
+            }
+          }
+        }
+      }
+      walk(baseDir, '');
+      return all.sort();
+    },
+    async presignUrl(key, { method = 'GET', expiresSec = 900, expiresIn = 900 } = {}) {
+      const safe = sanitizeFileKey(key);
+      const baseOrigin = (
+        env?.MYSHIP_DEV_ORIGIN || `http://127.0.0.1:${env?.PORT || 4321}`
+      ).replace(/\/$/, '');
+      const exp = Math.floor(Date.now() / 1000) + Number(expiresSec || expiresIn || 900);
+      return `${baseOrigin}/_myship_files/${encodeURIComponent(cleanProj)}/${safe}?method=${encodeURIComponent(
+        String(method).toUpperCase()
+      )}&expires=${exp}`;
+    },
+  };
+}
+
+function attachQueryResultMeta(rows, rowsAffected = 0, lastInsertRowid = null) {
+  const arr = Array.isArray(rows) ? rows : [];
+  Object.defineProperties(arr, {
+    rows: { value: arr, enumerable: false },
+    rowsAffected: { value: rowsAffected, enumerable: false },
+    lastInsertRowid: { value: lastInsertRowid, enumerable: false },
+  });
+  return arr;
+}
+
+function formatTursoArg(v) {
+  if (v === null || v === undefined) return { type: 'null' };
+  if (typeof v === 'boolean') return { type: 'integer', value: v ? '1' : '0' };
+  if (typeof v === 'number') {
+    return Number.isInteger(v)
+      ? { type: 'integer', value: String(v) }
+      : { type: 'float', value: v };
+  }
+  return { type: 'text', value: String(v) };
+}
+
+function parseTursoResult(resObj) {
+  if (!resObj) return { rows: [], rowsAffected: 0, lastInsertRowid: null };
+  const cols = Array.isArray(resObj.cols) ? resObj.cols : [];
+  const rawRows = Array.isArray(resObj.rows) ? resObj.rows : [];
+  const rows = rawRows.map((rowArr) => {
+    const obj = {};
+    cols.forEach((col, i) => {
+      const cell = rowArr[i];
+      if (!cell || cell.type === 'null') {
+        obj[col.name] = null;
+      } else if (cell.type === 'integer') {
+        const num = Number(cell.value);
+        obj[col.name] = Number.isSafeInteger(num) ? num : cell.value;
+      } else if (cell.type === 'float') {
+        obj[col.name] = Number(cell.value);
+      } else {
+        obj[col.name] = cell.value;
+      }
+    });
+    return obj;
+  });
+  return {
+    rows,
+    rowsAffected: Number(resObj.affected_row_count || 0),
+    lastInsertRowid:
+      resObj.last_insert_rowid !== undefined && resObj.last_insert_rowid !== null
+        ? Number(resObj.last_insert_rowid)
+        : null,
+  };
+}
+
+const ACTIVE_DB_POOLS = new Map();
+
+async function disposeCachedPoolEntry(entry) {
+  if (!entry || !entry.poolPromise) return;
+  try {
+    const inst = await entry.poolPromise;
+    if (inst && typeof inst.end === 'function') {
+      await inst.end().catch(() => {});
+    } else if (inst && typeof inst.close === 'function') {
+      inst.close();
+    }
+  } catch {
+    // ignore cleanup error
+  }
+}
+
+export async function closeDatabasePools(project = null) {
+  const cleanFilter = project ? normalizeDomainToken(project) || 'default' : null;
+  const tasks = [];
+  for (const [key, entry] of ACTIVE_DB_POOLS.entries()) {
+    if (!cleanFilter || entry.project === cleanFilter) {
+      ACTIVE_DB_POOLS.delete(key);
+      tasks.push(disposeCachedPoolEntry(entry));
+    }
+  }
+  await Promise.all(tasks);
+}
+
+function withDbAliases(client, project = null) {
+  if (!client) return client;
+  client.exec = (sql, params = []) => client.execute(sql, params);
+  client.run = (sql, params = []) => client.execute(sql, params);
+  client.all = (sql, params = []) => client.query(sql, params);
+  client.first = async (sql, params = []) => {
+    const rows = await client.query(sql, params);
+    return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+  };
+  if (typeof client.close !== 'function') {
+    client.close = () => closeDatabasePools(project);
+  }
+  return client;
+}
+
+/**
+ * 创建统一数据库客户端 (context.db)
+ * - 支持 Turso HTTP (/v2/pipeline)、Cloudflare D1 HTTP (/query)、腾讯云 CloudBase PG (DATABASE_URL)
+ * - 本地开发默认使用 Node.js 22+ 原生内置 node:sqlite (DatabaseSync) 落盘至 .myship/data/<project>/local.sqlite
+ */
+export function createDatabaseClient({
+  cwd = process.cwd(),
+  project = 'default',
+  env = process.env,
+  preferLocalSqlite = true,
+} = {}) {
+  const cleanProj = normalizeDomainToken(project) || 'default';
+  const explicitProv = String(env?.MYSHIP_DB_PROVIDER || '').toLowerCase();
+  const isSqliteFamily =
+    !explicitProv ||
+    explicitProv === 'sqlite' ||
+    explicitProv === 'turso' ||
+    explicitProv === 'libsql' ||
+    explicitProv === 'd1' ||
+    explicitProv === 'cloudflare-d1';
+  const useRemote =
+    !preferLocalSqlite ||
+    !isSqliteFamily ||
+    env?.MYSHIP_DB_REMOTE === '1' ||
+    env?.MYSHIP_DB_REMOTE === 'true';
+
+  if (
+    useRemote &&
+    (!explicitProv || explicitProv === 'turso' || explicitProv === 'libsql') &&
+    env?.TURSO_DATABASE_URL &&
+    env?.TURSO_AUTH_TOKEN
+  ) {
+    const httpBase = String(env.TURSO_DATABASE_URL)
+      .replace(/^libsql:\/\//i, 'https://')
+      .replace(/\/$/, '');
+    const token = env.TURSO_AUTH_TOKEN;
+
+    async function runStatements(stmts) {
+      const requests = stmts.map((s) => {
+        const sql = typeof s === 'string' ? s : Array.isArray(s) ? s[0] : s.sql;
+        const params = typeof s === 'string' ? [] : Array.isArray(s) ? s[1] || [] : s.params || [];
+        return {
+          type: 'execute',
+          stmt: {
+            sql,
+            args: params.map(formatTursoArg),
+          },
+        };
+      });
+      requests.push({ type: 'close' });
+      const res = await fetch(`${httpBase}/v2/pipeline`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ requests }),
+      });
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(`Turso HTTP SQL 执行失败 (${res.status}): ${txt.slice(0, 300)}`);
+      }
+      const data = await res.json();
+      const results = [];
+      for (const item of data.results || []) {
+        if (item.type === 'error') {
+          throw new Error(`Turso SQL Error: ${item.error?.message || JSON.stringify(item.error)}`);
+        }
+        if (item.type === 'ok' && item.response?.type === 'execute') {
+          results.push(parseTursoResult(item.response.result));
+        }
+      }
+      return results;
+    }
+
+    return withDbAliases({
+      provider: 'turso',
+      url: env.TURSO_DATABASE_URL,
+      async execute(sql, params = []) {
+        const [first] = await runStatements([{ sql, params }]);
+        return first || { rows: [], rowsAffected: 0, lastInsertRowid: null };
+      },
+      async query(sql, params = []) {
+        const res = await this.execute(sql, params);
+        return attachQueryResultMeta(res.rows, res.rowsAffected, res.lastInsertRowid);
+      },
+      async batch(statements = []) {
+        return runStatements(statements);
+      },
+    });
+  }
+
+  if (
+    useRemote &&
+    (!explicitProv || explicitProv === 'd1' || explicitProv === 'cloudflare-d1') &&
+    env?.CF_ACCOUNT_ID &&
+    env?.CF_D1_DATABASE_ID &&
+    env?.CF_API_TOKEN
+  ) {
+    const apiBase = (env.CF_API_BASE_URL || 'https://api.cloudflare.com/client/v4').replace(/\/$/, '');
+    const endpoint = `${apiBase}/accounts/${env.CF_ACCOUNT_ID}/d1/database/${env.CF_D1_DATABASE_ID}/query`;
+    const token = env.CF_API_TOKEN;
+
+    async function runD1(sql, params = []) {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ sql, params }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.success === false) {
+        const msg =
+          data?.errors?.[0]?.message || `Cloudflare D1 HTTP 失败 (${res.status})`;
+        throw new Error(`Cloudflare D1 SQL Error: ${msg}`);
+      }
+      const first = Array.isArray(data.result) ? data.result[0] || {} : data.result || {};
+      const rows = Array.isArray(first.results) ? first.results : [];
+      const rowsAffected = Number(first.meta?.changes ?? 0);
+      const lastInsertRowid =
+        first.meta?.last_row_id !== undefined ? Number(first.meta.last_row_id) : null;
+      return { rows, rowsAffected, lastInsertRowid };
+    }
+
+    return withDbAliases({
+      provider: 'd1',
+      databaseId: env.CF_D1_DATABASE_ID,
+      async execute(sql, params = []) {
+        return runD1(sql, params);
+      },
+      async query(sql, params = []) {
+        const res = await runD1(sql, params);
+        return attachQueryResultMeta(res.rows, res.rowsAffected, res.lastInsertRowid);
+      },
+      async batch(statements = []) {
+        const out = [];
+        for (const s of statements) {
+          const sql = typeof s === 'string' ? s : Array.isArray(s) ? s[0] : s.sql;
+          const params =
+            typeof s === 'string' ? [] : Array.isArray(s) ? s[1] || [] : s.params || [];
+          out.push(await runD1(sql, params));
+        }
+        return out;
+      },
+    });
+  }
+
+  const neonConnUrl =
+    env?.NEON_DATABASE_URL ||
+    (explicitProv === 'neon' && env?.DATABASE_URL ? env.DATABASE_URL : '');
+  if (
+    useRemote &&
+    (!explicitProv || explicitProv === 'neon' || explicitProv === 'neon-pg') &&
+    neonConnUrl
+  ) {
+    const parsedNeon = new URL(neonConnUrl);
+    const activeSchema = env.PG_SCHEMA || parsedNeon.searchParams.get('schema') || null;
+    if (parsedNeon.hostname.includes('-pooler.')) {
+      parsedNeon.searchParams.delete('options');
+    } else if (activeSchema && activeSchema !== 'public') {
+      parsedNeon.searchParams.set('options', `-c search_path=${activeSchema},public`);
+    }
+    const effectiveNeonConnStr = parsedNeon.toString();
+    const endpoint =
+      env.NEON_HTTP_URL || env.MYSHIP_NEON_HTTP_ENDPOINT || `https://${parsedNeon.host}/sql`;
+
+    function toPgParams(sql, params = []) {
+      if (!Array.isArray(params) || params.length === 0 || !sql.includes('?') || /\$\d+/.test(sql)) {
+        return sql;
+      }
+      let idx = 0;
+      return sql.replace(/\?/g, () => `$${++idx}`);
+    }
+
+    async function runNeon(sql, params = []) {
+      const normalizedSql = toPgParams(sql, params);
+      const useTxnSchema = Boolean(activeSchema && activeSchema !== 'public');
+      const safeSchema = useTxnSchema ? String(activeSchema).replace(/"/g, '""') : '';
+      const bodyPayload = useTxnSchema
+        ? {
+            queries: [
+              { query: `SET LOCAL search_path TO "${safeSchema}", public`, params: [] },
+              { query: normalizedSql, params },
+            ],
+          }
+        : { query: normalizedSql, params };
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Neon-Connection-String': effectiveNeonConnStr,
+          'Content-Type': 'application/json',
+          'Neon-Raw-Text-Output': 'false',
+          'Neon-Array-Mode': 'false',
+        },
+        body: JSON.stringify(bodyPayload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.message) {
+        throw new Error(`Neon HTTP SQL Error (${res.status}): ${data.message || JSON.stringify(data)}`);
+      }
+      const targetResult = Array.isArray(data.results)
+        ? data.results[data.results.length - 1] || {}
+        : data;
+      const rows = Array.isArray(targetResult.rows) ? targetResult.rows : [];
+      const rowsAffected = Number(targetResult.rowCount ?? rows.length);
+      const lastInsertRowid = rows[0]?.id !== undefined ? rows[0].id : null;
+      return { rows, rowsAffected, lastInsertRowid };
+    }
+
+    return withDbAliases({
+      provider: 'neon',
+      url: effectiveNeonConnStr,
+      schema: activeSchema,
+      async execute(sql, params = []) {
+        return runNeon(sql, params);
+      },
+      async query(sql, params = []) {
+        const res = await runNeon(sql, params);
+        return attachQueryResultMeta(res.rows, res.rowsAffected, res.lastInsertRowid);
+      },
+      async batch(statements = []) {
+        const out = [];
+        for (const s of statements) {
+          const sql = typeof s === 'string' ? s : Array.isArray(s) ? s[0] : s.sql;
+          const params =
+            typeof s === 'string' ? [] : Array.isArray(s) ? s[1] || [] : s.params || [];
+          out.push(await runNeon(sql, params));
+        }
+        return out;
+      },
+    });
+  }
+
+  // 腾讯云 CloudBase PG 管控面 ExecutePGSql 零依赖查询通道
+  if (
+    useRemote &&
+    (!explicitProv ||
+      explicitProv === 'pg' ||
+      explicitProv === 'postgres' ||
+      explicitProv === 'cloudbase-pg') &&
+    env?.TCB_ENV_ID
+  ) {
+    const tcbEnvId = env.TCB_ENV_ID;
+    const tcbRegion = env.TCB_REGION || 'ap-shanghai';
+    const tcbSchema = env.PG_SCHEMA || null;
+
+    function formatPgLiteral(v) {
+      if (v === null || v === undefined) return 'NULL';
+      if (typeof v === 'boolean') return v ? 'TRUE' : 'FALSE';
+      if (typeof v === 'number' && Number.isFinite(v)) return String(v);
+      return `'${String(v).replace(/'/g, "''")}'`;
+    }
+
+    function bindSqlParams(sql, params = []) {
+      if (!Array.isArray(params) || params.length === 0) return sql;
+      if (/\$\d+/.test(sql)) {
+        return sql.replace(/\$(\d+)/g, (_, numStr) => {
+          const idx = Number(numStr) - 1;
+          return idx >= 0 && idx < params.length ? formatPgLiteral(params[idx]) : 'NULL';
+        });
+      }
+      let idx = 0;
+      return sql.replace(/\?/g, () =>
+        idx < params.length ? formatPgLiteral(params[idx++]) : 'NULL'
+      );
+    }
+
+    function parseTcbPgResponse(resp) {
+      const rs = resp?.ResultSet || resp || {};
+      const cols = Array.isArray(rs?.Columns) ? rs.Columns : [];
+      const types = Array.isArray(rs?.ColumnTypes) ? rs.ColumnTypes : [];
+      const rawRows = Array.isArray(rs?.Rows) ? rs.Rows : [];
+      const rows = rawRows.map((rowItem) => {
+        const arr = typeof rowItem === 'string' ? JSON.parse(rowItem) : rowItem;
+        const obj = {};
+        cols.forEach((rawCol, i) => {
+          const col = typeof rawCol === 'object' && rawCol !== null ? rawCol.Name || rawCol.name || String(i) : String(rawCol);
+          const val = arr[i];
+          const t = String(types[i] || rawCol?.Type || '').toLowerCase();
+          if (val === null || val === undefined) {
+            obj[col] = null;
+          } else if (t === 'int2' || t === 'int4' || t === 'int8' || t === 'float4' || t === 'float8') {
+            const num = Number(val);
+            obj[col] = Number.isSafeInteger(num) || t.startsWith('float') ? num : val;
+          } else if (t === 'bool' || t === 'boolean') {
+            obj[col] = val === true || val === 'true' || val === 't' || val === '1';
+          } else if (t === 'json' || t === 'jsonb') {
+            try {
+              obj[col] = typeof val === 'string' ? JSON.parse(val) : val;
+            } catch {
+              obj[col] = val;
+            }
+          } else {
+            obj[col] = val;
+          }
+        });
+        return obj;
+      });
+      return {
+        rows,
+        rowsAffected: Number(resp?.AffectedRows ?? rs?.AffectedRows ?? rows.length),
+        lastInsertRowid: rows[0]?.id !== undefined ? rows[0].id : null,
+      };
+    }
+
+    async function runTcbSql(sql, params = []) {
+      const boundSql = bindSqlParams(sql, params);
+      const resp = await executeCloudBasePgSql({
+        envId: tcbEnvId,
+        region: tcbRegion,
+        sql: boundSql,
+        schema: tcbSchema,
+      });
+      return parseTcbPgResponse(resp);
+    }
+
+    return withDbAliases({
+      provider: 'cloudbase-pg',
+      envId: tcbEnvId,
+      schema: tcbSchema,
+      async execute(sql, params = []) {
+        return runTcbSql(sql, params);
+      },
+      async query(sql, params = []) {
+        const res = await runTcbSql(sql, params);
+        return attachQueryResultMeta(res.rows, res.rowsAffected, res.lastInsertRowid);
+      },
+      async batch(statements = []) {
+        const out = [];
+        for (const s of statements) {
+          const sql = typeof s === 'string' ? s : Array.isArray(s) ? s[0] : s.sql;
+          const params =
+            typeof s === 'string' ? [] : Array.isArray(s) ? s[1] || [] : s.params || [];
+          out.push(await runTcbSql(sql, params));
+        }
+        return out;
+      },
+    });
+  }
+
+  // 原生 PostgreSQL (`pg.Pool`) 驱动通道
+  if (
+    useRemote &&
+    (!explicitProv || explicitProv === 'pg' || explicitProv === 'postgres') &&
+    !env?.TCB_ENV_ID &&
+    (env?.DATABASE_URL || env?.PGHOST)
+  ) {
+    const connStr = env.DATABASE_URL || '';
+    const activeSchema = env.PG_SCHEMA || null;
+    const poolKey = `${cleanProj}:pg`;
+    const poolSig = JSON.stringify({
+      connStr,
+      host: env.PGHOST || '',
+      port: String(env.PGPORT || 5432),
+      database: env.PGDATABASE || 'postgres',
+      user: env.PGUSER || 'postgres',
+      password: env.PGPASSWORD || '',
+      schema: activeSchema || '',
+    });
+
+    function toPgPositional(sql, params = []) {
+      if (!Array.isArray(params) || params.length === 0 || !sql.includes('?') || /\$\d+/.test(sql)) {
+        return sql;
+      }
+      let idx = 0;
+      return sql.replace(/\?/g, () => `$${++idx}`);
+    }
+
+    async function getPgPool() {
+      const existing = ACTIVE_DB_POOLS.get(poolKey);
+      if (existing && existing.sig === poolSig) {
+        return existing.poolPromise;
+      }
+      if (existing) {
+        ACTIVE_DB_POOLS.delete(poolKey);
+        disposeCachedPoolEntry(existing);
+      }
+      const poolPromise = (async () => {
+        const pgMod = await import('pg');
+        const PoolCtor = pgMod.default?.Pool || pgMod.Pool;
+        let isLocalHost = false;
+        let isPoolerHost = false;
+        let sslDisabled = false;
+        let cleanConnStr = connStr;
+        if (connStr) {
+          try {
+            const u = new URL(connStr);
+            isLocalHost =
+              u.hostname === '127.0.0.1' || u.hostname === 'localhost' || u.hostname === '::1';
+            isPoolerHost = u.hostname.includes('-pooler.');
+            sslDisabled = (u.searchParams.get('sslmode') || '').toLowerCase() === 'disable';
+            u.searchParams.delete('schema');
+            u.searchParams.delete('sslmode');
+            u.searchParams.delete('options');
+            cleanConnStr = u.toString();
+          } catch {
+            // ignore
+          }
+        } else {
+          isLocalHost =
+            env.PGHOST === '127.0.0.1' || env.PGHOST === 'localhost' || env.PGHOST === '::1';
+          isPoolerHost = String(env.PGHOST || '').includes('-pooler.');
+        }
+        if (isPoolerHost && process.env.PGOPTIONS) {
+          delete process.env.PGOPTIONS;
+        }
+        const pool = new PoolCtor(
+          cleanConnStr
+            ? {
+                connectionString: cleanConnStr,
+                max: 5,
+                ssl: isLocalHost || sslDisabled ? false : { rejectUnauthorized: false },
+              }
+            : {
+                host: env.PGHOST,
+                port: Number(env.PGPORT || 5432),
+                database: env.PGDATABASE || 'postgres',
+                user: env.PGUSER || 'postgres',
+                password: env.PGPASSWORD || '',
+                max: 5,
+                ssl: isLocalHost ? false : { rejectUnauthorized: false },
+              }
+        );
+        pool.on('error', (err) => {
+          console.warn('[MyShip PG Pool] Idle client error:', err?.message || err);
+        });
+        return pool;
+      })();
+      poolPromise.catch(() => {
+        if (ACTIVE_DB_POOLS.get(poolKey)?.poolPromise === poolPromise) {
+          ACTIVE_DB_POOLS.delete(poolKey);
+        }
+      });
+      ACTIVE_DB_POOLS.set(poolKey, { project: cleanProj, sig: poolSig, poolPromise });
+      return poolPromise;
+    }
+
+    async function runPgQuery(sql, params = []) {
+      if (`${connStr || ''} ${env.PGHOST || ''}`.includes('-pooler.') && process.env.PGOPTIONS) {
+        delete process.env.PGOPTIONS;
+      }
+      const pool = await getPgPool();
+      let res;
+      if (activeSchema && activeSchema !== 'public') {
+        const client = await pool.connect();
+        try {
+          const safeSc = String(activeSchema).replace(/"/g, '""');
+          await client.query('BEGIN');
+          try {
+            await client.query(`SET LOCAL search_path TO "${safeSc}", public`);
+            res =
+              Array.isArray(params) && params.length > 0
+                ? await client.query(toPgPositional(sql, params), params)
+                : await client.query(sql);
+            await client.query('COMMIT');
+          } catch (txErr) {
+            await client.query('ROLLBACK').catch(() => {});
+            throw txErr;
+          }
+        } finally {
+          client.release();
+        }
+      } else {
+        res =
+          Array.isArray(params) && params.length > 0
+            ? await pool.query(toPgPositional(sql, params), params)
+            : await pool.query(sql);
+      }
+      const rows = Array.isArray(res?.rows) ? res.rows : [];
+      return {
+        rows,
+        rowsAffected: Number(res?.rowCount ?? rows.length),
+        lastInsertRowid: rows[0]?.id !== undefined ? rows[0].id : null,
+      };
+    }
+
+    return withDbAliases(
+      {
+        provider: 'pg',
+        url: connStr || `postgresql://${env.PGHOST}:${env.PGPORT || 5432}/${env.PGDATABASE || 'postgres'}`,
+        schema: activeSchema,
+        async execute(sql, params = []) {
+          return runPgQuery(sql, params);
+        },
+        async query(sql, params = []) {
+          const res = await runPgQuery(sql, params);
+          return attachQueryResultMeta(res.rows, res.rowsAffected, res.lastInsertRowid);
+        },
+        async batch(statements = []) {
+          const out = [];
+          for (const s of statements) {
+            const sql = typeof s === 'string' ? s : Array.isArray(s) ? s[0] : s.sql;
+            const params =
+              typeof s === 'string' ? [] : Array.isArray(s) ? s[1] || [] : s.params || [];
+            out.push(await runPgQuery(sql, params));
+          }
+          return out;
+        },
+      },
+      cleanProj
+    );
+  }
+
+  // 原生 MySQL (`mysql2/promise`) 驱动通道
+  const mysqlConnUrl =
+    env?.MYSQL_URL || (explicitProv === 'mysql' && env?.DATABASE_URL ? env.DATABASE_URL : '');
+  if (useRemote && (!explicitProv || explicitProv === 'mysql') && mysqlConnUrl) {
+    const poolKey = `${cleanProj}:mysql`;
+    const poolSig = mysqlConnUrl;
+
+    async function getMysqlPool() {
+      const existing = ACTIVE_DB_POOLS.get(poolKey);
+      if (existing && existing.sig === poolSig) {
+        return existing.poolPromise;
+      }
+      if (existing) {
+        ACTIVE_DB_POOLS.delete(poolKey);
+        disposeCachedPoolEntry(existing);
+      }
+      const poolPromise = (async () => {
+        const mysqlMod = await import('mysql2/promise');
+        const createPoolFn = mysqlMod.default?.createPool || mysqlMod.createPool;
+        return createPoolFn({ uri: mysqlConnUrl, connectionLimit: 5 });
+      })();
+      poolPromise.catch(() => {
+        if (ACTIVE_DB_POOLS.get(poolKey)?.poolPromise === poolPromise) {
+          ACTIVE_DB_POOLS.delete(poolKey);
+        }
+      });
+      ACTIVE_DB_POOLS.set(poolKey, { project: cleanProj, sig: poolSig, poolPromise });
+      return poolPromise;
+    }
+
+    async function runMysqlQuery(sql, params = []) {
+      const pool = await getMysqlPool();
+      const [result] =
+        Array.isArray(params) && params.length > 0
+          ? await pool.execute(sql, params)
+          : await pool.query(sql);
+      if (Array.isArray(result)) {
+        return {
+          rows: result,
+          rowsAffected: result.length,
+          lastInsertRowid: result[0]?.id !== undefined ? result[0].id : null,
+        };
+      }
+      return {
+        rows: [],
+        rowsAffected: Number(result?.affectedRows ?? 0),
+        lastInsertRowid: result?.insertId !== undefined ? Number(result.insertId) : null,
+      };
+    }
+
+    return withDbAliases(
+      {
+        provider: 'mysql',
+        url: mysqlConnUrl,
+        async execute(sql, params = []) {
+          return runMysqlQuery(sql, params);
+        },
+        async query(sql, params = []) {
+          const res = await runMysqlQuery(sql, params);
+          return attachQueryResultMeta(res.rows, res.rowsAffected, res.lastInsertRowid);
+        },
+        async batch(statements = []) {
+          const out = [];
+          for (const s of statements) {
+            const sql = typeof s === 'string' ? s : Array.isArray(s) ? s[0] : s.sql;
+            const params =
+              typeof s === 'string' ? [] : Array.isArray(s) ? s[1] || [] : s.params || [];
+            out.push(await runMysqlQuery(sql, params));
+          }
+          return out;
+        },
+      },
+      cleanProj
+    );
+  }
+
+  // 本地开发 (SQLite 模式): 使用 Node.js 22+ 原生内置 node:sqlite (DatabaseSync)
+  const dbDir = resolve(cwd, '.myship', 'data', cleanProj);
+  const sqliteFile = resolve(dbDir, 'local.sqlite');
+  const sqlitePoolKey = `${cleanProj}:sqlite`;
+  const sqlitePoolSig = sqliteFile;
+
+  async function getLocalDb() {
+    const existing = ACTIVE_DB_POOLS.get(sqlitePoolKey);
+    if (existing && existing.sig === sqlitePoolSig && existsSync(sqliteFile)) {
+      return existing.poolPromise;
+    }
+    if (existing) {
+      ACTIVE_DB_POOLS.delete(sqlitePoolKey);
+      disposeCachedPoolEntry(existing);
+    }
+    const poolPromise = (async () => {
+      const sqliteMod = await import('node:sqlite');
+      mkdirSync(dbDir, { recursive: true });
+      return new sqliteMod.DatabaseSync(sqliteFile);
+    })();
+    poolPromise.catch(() => {
+      if (ACTIVE_DB_POOLS.get(sqlitePoolKey)?.poolPromise === poolPromise) {
+        ACTIVE_DB_POOLS.delete(sqlitePoolKey);
+      }
+    });
+    ACTIVE_DB_POOLS.set(sqlitePoolKey, {
+      project: cleanProj,
+      sig: sqlitePoolSig,
+      poolPromise,
+    });
+    return poolPromise;
+  }
+
+  async function execLocal(sql, params = []) {
+    const db = await getLocalDb();
+    const stmt = db.prepare(sql);
+    const isSelectLike =
+      /^\s*(SELECT|PRAGMA|WITH|EXPLAIN)\b/i.test(sql) || /\bRETURNING\b/i.test(sql);
+    if (isSelectLike) {
+      const rawRows = stmt.all(...params);
+      const rows = Array.isArray(rawRows) ? rawRows.map((r) => ({ ...r })) : [];
+      return { rows, rowsAffected: rows.length, lastInsertRowid: null };
+    }
+    const info = stmt.run(...params);
+    return {
+      rows: [],
+      rowsAffected: Number(info?.changes ?? 0),
+      lastInsertRowid:
+        info?.lastInsertRowid !== undefined && info?.lastInsertRowid !== null
+          ? Number(info.lastInsertRowid)
+          : null,
+    };
+  }
+
+  return withDbAliases(
+    {
+      provider: 'sqlite-local',
+      filePath: sqliteFile,
+      url: env?.TURSO_DATABASE_URL || `file:${sqliteFile}`,
+      schema: null,
+      async execute(sql, params = []) {
+        return execLocal(sql, params);
+      },
+      async query(sql, params = []) {
+        const res = await execLocal(sql, params);
+        return attachQueryResultMeta(res.rows, res.rowsAffected, res.lastInsertRowid);
+      },
+      async batch(statements = []) {
+        const out = [];
+        for (const s of statements) {
+          const sql = typeof s === 'string' ? s : Array.isArray(s) ? s[0] : s.sql;
+          const params =
+            typeof s === 'string' ? [] : Array.isArray(s) ? s[1] || [] : s.params || [];
+          out.push(await execLocal(sql, params));
+        }
+        return out;
+      },
+    },
+    cleanProj
+  );
 }
 
 export async function dispatchFullStackModule(rawMod, request, context) {
@@ -281,6 +1167,9 @@ export async function dispatchFullStackModule(rawMod, request, context) {
 
 function generateBootstrapRuntimeSource(userAppImportPath = '../server/index.mjs') {
   return `import http from 'node:http';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { createHash, createHmac } from 'node:crypto';
 
 if (typeof process.setSourceMapsEnabled === 'function') {
@@ -299,6 +1188,53 @@ function sha1Hex(str) {
 function hmacSha1Hex(key, str) {
   return createHmac('sha1', key).update(str).digest('hex');
 }
+function sha256HexStr(str) {
+  return createHash('sha256').update(str, 'utf8').digest('hex');
+}
+function hmacSha256Buf(key, str) {
+  return createHmac('sha256', key).update(str, 'utf8').digest();
+}
+function hmacSha256Hex(key, str) {
+  return createHmac('sha256', key).update(str, 'utf8').digest('hex');
+}
+
+function resolveTencentCreds() {
+  let secretId =
+    process.env.MYSHIP_DATA_SECRET_ID ||
+    process.env.TENCENT_SECRET_ID ||
+    process.env.TENCENTCLOUD_SECRETID ||
+    '';
+  let secretKey =
+    process.env.MYSHIP_DATA_SECRET_KEY ||
+    process.env.TENCENT_SECRET_KEY ||
+    process.env.TENCENTCLOUD_SECRETKEY ||
+    '';
+  let token =
+    process.env.MYSHIP_DATA_TOKEN ||
+    process.env.TENCENT_TOKEN ||
+    process.env.TENCENTCLOUD_SESSIONTOKEN ||
+    '';
+  if (secretId && secretKey) return { secretId, secretKey, token };
+  try {
+    const cfgPath = process.env.MYSHIP_CONFIG_PATH || join(homedir(), '.myship', 'config.json');
+    if (existsSync(cfgPath)) {
+      const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'));
+      if (cfg.secretId && cfg.secretKey) {
+        return { secretId: cfg.secretId, secretKey: cfg.secretKey, token: cfg.token || '' };
+      }
+    }
+  } catch {}
+  try {
+    const tcPath = join(homedir(), '.tccli', 'default.credential');
+    if (existsSync(tcPath)) {
+      const tc = JSON.parse(readFileSync(tcPath, 'utf8'));
+      if (tc.secretId && tc.secretKey) {
+        return { secretId: tc.secretId, secretKey: tc.secretKey, token: tc.token || '' };
+      }
+    }
+  } catch {}
+  return { secretId, secretKey, token };
+}
 
 function sanitizeStorageKey(key) {
   const clean = String(key || '')
@@ -312,34 +1248,49 @@ function sanitizeStorageKey(key) {
   return clean;
 }
 
+function sanitizeFileKey(key) {
+  const clean = String(key || '')
+    .trim()
+    .replace(/^\\/+|\\/+$/g, '')
+    .replace(/\\\\/g, '/')
+    .replace(/[^a-zA-Z0-9._/-]/g, '_');
+  if (!clean || clean.includes('..')) {
+    throw new Error('Invalid file key: ' + key);
+  }
+  return clean;
+}
+
 function createCloudStorage() {
   const cosOrigin = (process.env.MYSHIP_COS_ORIGIN || '').replace(/\\/$/, '');
-  const secretId =
-    process.env.MYSHIP_DATA_SECRET_ID || process.env.TENCENTCLOUD_SECRETID || '';
-  const secretKey =
-    process.env.MYSHIP_DATA_SECRET_KEY || process.env.TENCENTCLOUD_SECRETKEY || '';
-  const sessionToken =
-    process.env.MYSHIP_DATA_TOKEN || process.env.TENCENTCLOUD_SESSIONTOKEN || '';
-  const prefixBase = 'data/' + PROJECT + '/';
+  const { secretId, secretKey, token: sessionToken } = resolveTencentCreds();
+  const rawStorageEnv = process.env.MYSHIP_STORAGE_ENV
+    ? sanitizeStorageKey(process.env.MYSHIP_STORAGE_ENV)
+    : '';
+  const envSub = rawStorageEnv && rawStorageEnv !== 'prod' ? rawStorageEnv + '/' : '';
+  const prefixBase = 'data/' + PROJECT + '/' + envSub;
+  const filesPrefixBase = 'files/' + PROJECT + '/' + envSub;
 
   if (!cosOrigin || !secretId || !secretKey) {
     const missingErr = () => {
       throw new Error(
-        'Cloud persistent storage (context.storage) is unavailable: missing COS credentials in SCF environment (MYSHIP_COS_ORIGIN / MYSHIP_DATA_SECRET_ID / MYSHIP_DATA_SECRET_KEY).'
+        'Cloud persistent storage (context.storage / context.files) is unavailable: missing COS credentials in SCF environment (MYSHIP_COS_ORIGIN / MYSHIP_DATA_SECRET_ID / MYSHIP_DATA_SECRET_KEY).'
       );
     };
-    return {
+    const stub = {
       async get() { return missingErr(); },
       async set() { return missingErr(); },
+      async put() { return missingErr(); },
       async delete() { return missingErr(); },
       async list() { return missingErr(); },
+      async presignUrl() { return missingErr(); },
     };
+    return { storage: stub, files: stub };
   }
 
-  function signCos(method, objectKey) {
+  function signCos(method, objectKey, expiresSec = 3600) {
     const url = new URL(objectKey.startsWith('/') ? objectKey : '/' + objectKey, cosOrigin);
     const now = Math.floor(Date.now() / 1000);
-    const keyTime = (now - 60) + ';' + (now + 3600);
+    const keyTime = (now - 60) + ';' + (now + Number(expiresSec || 3600));
     const signKey = hmacSha1Hex(secretKey, keyTime);
     const paramEntries = [];
     for (const [k, v] of url.searchParams.entries()) {
@@ -351,24 +1302,25 @@ function createCloudStorage() {
     const httpString = method.toLowerCase() + '\\n' + url.pathname + '\\n' + httpParameters + '\\nhost=' + encodeURIComponent(url.host).toLowerCase() + '\\n';
     const stringToSign = 'sha1\\n' + keyTime + '\\n' + sha1Hex(httpString) + '\\n';
     const signature = hmacSha1Hex(signKey, stringToSign);
+    const authParts = [
+      'q-sign-algorithm=sha1',
+      'q-sign-time=' + keyTime,
+      'q-key-time=' + keyTime,
+      'q-ak=' + secretId,
+      'q-header-list=host',
+      'q-url-param-list=' + urlParamList,
+      'q-signature=' + signature,
+    ];
     const headers = {
-      Authorization: [
-        'q-sign-algorithm=sha1',
-        'q-sign-time=' + keyTime,
-        'q-key-time=' + keyTime,
-        'q-ak=' + secretId,
-        'q-header-list=host',
-        'q-url-param-list=' + urlParamList,
-        'q-signature=' + signature,
-      ].join('&'),
+      Authorization: authParts.join('&'),
     };
     if (sessionToken) {
       headers['x-cos-security-token'] = sessionToken;
     }
-    return { url: url.toString(), headers };
+    return { url: url.toString(), headers, authQuery: authParts.join('&') };
   }
 
-  return {
+  const storageObj = {
     async get(key, defaultValue = null) {
       const safe = sanitizeStorageKey(key);
       const objKey = prefixBase + safe + '.json';
@@ -425,10 +1377,692 @@ function createCloudStorage() {
       return out.sort();
     },
   };
+
+  const filesObj = {
+    prefix: filesPrefixBase,
+    async put(key, body, options = {}) {
+      const safe = sanitizeFileKey(key);
+      const objKey = filesPrefixBase + safe;
+      const { url, headers } = signCos('PUT', objKey);
+      const contentType = options.contentType || 'application/octet-stream';
+      headers['Content-Type'] = contentType;
+      headers['x-cos-acl'] = options.acl || 'private';
+      const buf = Buffer.isBuffer(body)
+        ? body
+        : body instanceof Uint8Array
+        ? Buffer.from(body)
+        : body instanceof ArrayBuffer
+        ? Buffer.from(new Uint8Array(body))
+        : Buffer.from(String(body ?? ''), 'utf8');
+      const res = await fetch(url, { method: 'PUT', headers, body: buf });
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error('COS files.put failed (' + res.status + '): ' + txt.slice(0, 200));
+      }
+      return { key: safe, size: buf.length, contentType };
+    },
+    async get(key, options = {}) {
+      const safe = sanitizeFileKey(key);
+      const objKey = filesPrefixBase + safe;
+      const { url, headers } = signCos('GET', objKey);
+      const res = await fetch(url, { method: 'GET', headers });
+      if (res.status === 404) return null;
+      if (!res.ok) throw new Error('COS files.get failed (' + res.status + ')');
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (options.type === 'text') return buf.toString('utf8');
+      if (options.type === 'json') return JSON.parse(buf.toString('utf8'));
+      buf.contentType = res.headers.get('content-type') || 'application/octet-stream';
+      buf.size = buf.length;
+      return buf;
+    },
+    async delete(key) {
+      const safe = sanitizeFileKey(key);
+      const objKey = filesPrefixBase + safe;
+      const { url, headers } = signCos('DELETE', objKey);
+      const res = await fetch(url, { method: 'DELETE', headers });
+      if (!res.ok && res.status !== 404 && res.status !== 204) {
+        throw new Error('COS files.delete failed (' + res.status + ')');
+      }
+      return true;
+    },
+    async list(prefix = '') {
+      const fullPrefix = filesPrefixBase + (prefix ? String(prefix).replace(/^\\/+/, '') : '');
+      const { url, headers } = signCos('GET', '/?prefix=' + encodeURIComponent(fullPrefix) + '&max-keys=1000');
+      const res = await fetch(url, { method: 'GET', headers });
+      if (!res.ok) throw new Error('COS files.list failed (' + res.status + ')');
+      const xml = await res.text();
+      const regex = /<Key>([^<]+)<\\/Key>/g;
+      const out = [];
+      let m;
+      while ((m = regex.exec(xml)) !== null) {
+        if (m[1].startsWith(filesPrefixBase)) {
+          out.push(m[1].slice(filesPrefixBase.length));
+        }
+      }
+      return out.sort();
+    },
+    async presignUrl(key, { method = 'GET', expiresSec = 900 } = {}) {
+      const safe = sanitizeFileKey(key);
+      const objKey = filesPrefixBase + safe;
+      const { url, authQuery } = signCos(method, objKey, expiresSec);
+      const tokenPart = sessionToken ? '&x-cos-security-token=' + encodeURIComponent(sessionToken) : '';
+      return url + (url.includes('?') ? '&' : '?') + authQuery + tokenPart;
+    },
+  };
+
+  return { storage: storageObj, files: filesObj };
 }
 
-const storage = createCloudStorage();
+function createCloudDbClient() {
+  function attachMeta(rows, rowsAffected = 0, lastInsertRowid = null) {
+    const arr = Array.isArray(rows) ? rows : [];
+    Object.defineProperties(arr, {
+      rows: { value: arr, enumerable: false },
+      rowsAffected: { value: rowsAffected, enumerable: false },
+      lastInsertRowid: { value: lastInsertRowid, enumerable: false },
+    });
+    return arr;
+  }
+  function withCloudAliases(client) {
+    if (!client) return client;
+    client.exec = (sql, params = []) => client.execute(sql, params);
+    client.run = (sql, params = []) => client.execute(sql, params);
+    client.all = (sql, params = []) => client.query(sql, params);
+    client.first = async (sql, params = []) => {
+      const rows = await client.query(sql, params);
+      return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+    };
+    return client;
+  }
+
+  const explicitProv = String(process.env.MYSHIP_DB_PROVIDER || '').toLowerCase();
+
+  if (
+    (!explicitProv || explicitProv === 'turso' || explicitProv === 'libsql') &&
+    process.env.TURSO_DATABASE_URL &&
+    process.env.TURSO_AUTH_TOKEN
+  ) {
+    const httpBase = String(process.env.TURSO_DATABASE_URL)
+      .replace(/^libsql:\\/\\//i, 'https://')
+      .replace(/\\/$/, '');
+    const token = process.env.TURSO_AUTH_TOKEN;
+    const fmtArg = (v) => {
+      if (v === null || v === undefined) return { type: 'null' };
+      if (typeof v === 'boolean') return { type: 'integer', value: v ? '1' : '0' };
+      if (typeof v === 'number') {
+        return Number.isInteger(v) ? { type: 'integer', value: String(v) } : { type: 'float', value: v };
+      }
+      return { type: 'text', value: String(v) };
+    };
+    const parseRes = (resObj) => {
+      if (!resObj) return { rows: [], rowsAffected: 0, lastInsertRowid: null };
+      const cols = Array.isArray(resObj.cols) ? resObj.cols : [];
+      const rows = (resObj.rows || []).map((rowArr) => {
+        const obj = {};
+        cols.forEach((col, i) => {
+          const cell = rowArr[i];
+          if (!cell || cell.type === 'null') obj[col.name] = null;
+          else if (cell.type === 'integer') {
+            const n = Number(cell.value);
+            obj[col.name] = Number.isSafeInteger(n) ? n : cell.value;
+          } else if (cell.type === 'float') obj[col.name] = Number(cell.value);
+          else obj[col.name] = cell.value;
+        });
+        return obj;
+      });
+      return {
+        rows,
+        rowsAffected: Number(resObj.affected_row_count || 0),
+        lastInsertRowid:
+          resObj.last_insert_rowid !== undefined && resObj.last_insert_rowid !== null
+            ? Number(resObj.last_insert_rowid)
+            : null,
+      };
+    };
+    const runStmts = async (stmts) => {
+      const requests = stmts.map((s) => {
+        const sql = typeof s === 'string' ? s : Array.isArray(s) ? s[0] : s.sql;
+        const params = typeof s === 'string' ? [] : Array.isArray(s) ? s[1] || [] : s.params || [];
+        return { type: 'execute', stmt: { sql, args: params.map(fmtArg) } };
+      });
+      requests.push({ type: 'close' });
+      const res = await fetch(httpBase + '/v2/pipeline', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requests }),
+      });
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error('Turso HTTP failed (' + res.status + '): ' + txt.slice(0, 200));
+      }
+      const data = await res.json();
+      const out = [];
+      for (const item of data.results || []) {
+        if (item.type === 'error') throw new Error('Turso SQL Error: ' + (item.error?.message || 'unknown'));
+        if (item.type === 'ok' && item.response?.type === 'execute') {
+          out.push(parseRes(item.response.result));
+        }
+      }
+      return out;
+    };
+    return withCloudAliases({
+      provider: 'turso',
+      url: process.env.TURSO_DATABASE_URL,
+      async execute(sql, params = []) {
+        const [first] = await runStmts([{ sql, params }]);
+        return first || { rows: [], rowsAffected: 0, lastInsertRowid: null };
+      },
+      async query(sql, params = []) {
+        const r = await this.execute(sql, params);
+        return attachMeta(r.rows, r.rowsAffected, r.lastInsertRowid);
+      },
+      async batch(stmts = []) {
+        return runStmts(stmts);
+      },
+    });
+  }
+
+  if (
+    (!explicitProv || explicitProv === 'd1' || explicitProv === 'cloudflare-d1') &&
+    process.env.CF_ACCOUNT_ID &&
+    process.env.CF_D1_DATABASE_ID &&
+    process.env.CF_API_TOKEN
+  ) {
+    const apiBase = (process.env.CF_API_BASE_URL || 'https://api.cloudflare.com/client/v4').replace(/\\/$/, '');
+    const endpoint = apiBase + '/accounts/' + process.env.CF_ACCOUNT_ID + '/d1/database/' + process.env.CF_D1_DATABASE_ID + '/query';
+    const token = process.env.CF_API_TOKEN;
+    const runD1 = async (sql, params = []) => {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sql, params }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.success === false) {
+        throw new Error('Cloudflare D1 SQL Error: ' + (data?.errors?.[0]?.message || res.status));
+      }
+      const first = Array.isArray(data.result) ? data.result[0] || {} : data.result || {};
+      return {
+        rows: Array.isArray(first.results) ? first.results : [],
+        rowsAffected: Number(first.meta?.changes ?? 0),
+        lastInsertRowid: first.meta?.last_row_id !== undefined ? Number(first.meta.last_row_id) : null,
+      };
+    };
+    return withCloudAliases({
+      provider: 'd1',
+      databaseId: process.env.CF_D1_DATABASE_ID,
+      async execute(sql, params = []) { return runD1(sql, params); },
+      async query(sql, params = []) {
+        const r = await runD1(sql, params);
+        return attachMeta(r.rows, r.rowsAffected, r.lastInsertRowid);
+      },
+      async batch(stmts = []) {
+        const out = [];
+        for (const s of stmts) {
+          const sql = typeof s === 'string' ? s : Array.isArray(s) ? s[0] : s.sql;
+          const params = typeof s === 'string' ? [] : Array.isArray(s) ? s[1] || [] : s.params || [];
+          out.push(await runD1(sql, params));
+        }
+        return out;
+      },
+    });
+  }
+
+  const neonConnUrl =
+    process.env.NEON_DATABASE_URL ||
+    (explicitProv === 'neon' && process.env.DATABASE_URL
+      ? process.env.DATABASE_URL
+      : '');
+  if (
+    (!explicitProv || explicitProv === 'neon' || explicitProv === 'neon-pg') &&
+    neonConnUrl
+  ) {
+    const parsedNeon = new URL(neonConnUrl);
+    const activeSchema = process.env.PG_SCHEMA || parsedNeon.searchParams.get('schema') || null;
+    if (parsedNeon.hostname.includes('-pooler.')) {
+      parsedNeon.searchParams.delete('options');
+    } else if (activeSchema && activeSchema !== 'public') {
+      parsedNeon.searchParams.set('options', '-c search_path=' + activeSchema + ',public');
+    }
+    const effectiveNeonConnStr = parsedNeon.toString();
+    const endpoint =
+      process.env.NEON_HTTP_URL ||
+      process.env.MYSHIP_NEON_HTTP_ENDPOINT ||
+      'https://' + parsedNeon.host + '/sql';
+    const toPgParams = (sql, params = []) => {
+      if (!Array.isArray(params) || params.length === 0 || !sql.includes('?') || /\\$\\d+/.test(sql)) {
+        return sql;
+      }
+      let idx = 0;
+      return sql.replace(/\\?/g, () => '$' + (++idx));
+    };
+    const runNeon = async (sql, params = []) => {
+      const normalizedSql = toPgParams(sql, params);
+      const useTxnSchema = Boolean(activeSchema && activeSchema !== 'public');
+      const safeSchema = useTxnSchema ? String(activeSchema).replace(/"/g, '""') : '';
+      const bodyPayload = useTxnSchema
+        ? {
+            queries: [
+              { query: 'SET LOCAL search_path TO "' + safeSchema + '", public', params: [] },
+              { query: normalizedSql, params },
+            ],
+          }
+        : { query: normalizedSql, params };
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Neon-Connection-String': effectiveNeonConnStr,
+          'Content-Type': 'application/json',
+          'Neon-Raw-Text-Output': 'false',
+          'Neon-Array-Mode': 'false',
+        },
+        body: JSON.stringify(bodyPayload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.message) {
+        throw new Error('Neon HTTP SQL Error (' + res.status + '): ' + (data.message || JSON.stringify(data)));
+      }
+      const targetResult = Array.isArray(data.results)
+        ? data.results[data.results.length - 1] || {}
+        : data;
+      const rows = Array.isArray(targetResult.rows) ? targetResult.rows : [];
+      return {
+        rows,
+        rowsAffected: Number(targetResult.rowCount ?? rows.length),
+        lastInsertRowid: rows[0]?.id !== undefined ? rows[0].id : null,
+      };
+    };
+    return withCloudAliases({
+      provider: 'neon',
+      url: effectiveNeonConnStr,
+      schema: activeSchema,
+      async execute(sql, params = []) { return runNeon(sql, params); },
+      async query(sql, params = []) {
+        const r = await runNeon(sql, params);
+        return attachMeta(r.rows, r.rowsAffected, r.lastInsertRowid);
+      },
+      async batch(stmts = []) {
+        const out = [];
+        for (const s of stmts) {
+          const sql = typeof s === 'string' ? s : Array.isArray(s) ? s[0] : s.sql;
+          const params = typeof s === 'string' ? [] : Array.isArray(s) ? s[1] || [] : s.params || [];
+          out.push(await runNeon(sql, params));
+        }
+        return out;
+      },
+    });
+  }
+
+  // 腾讯云 CloudBase PG 管控面 ExecutePGSql 云端运行通道
+  if (
+    (!explicitProv ||
+      explicitProv === 'pg' ||
+      explicitProv === 'postgres' ||
+      explicitProv === 'cloudbase-pg') &&
+    process.env.TCB_ENV_ID
+  ) {
+    const tcbEnvId = process.env.TCB_ENV_ID;
+    const tcbRegion = process.env.TCB_REGION || 'ap-shanghai';
+    const tcbSchema = process.env.PG_SCHEMA || null;
+    const ddlKeywordsRe = /^\\s*(CREATE|DROP|ALTER|GRANT|REVOKE|TRUNCATE|COMMENT|SET|RESET|LOCK|REINDEX|CLUSTER|VACUUM|ANALYZE)\\b/i;
+
+    const formatPgLit = (v) => {
+      if (v === null || v === undefined) return 'NULL';
+      if (typeof v === 'boolean') return v ? 'TRUE' : 'FALSE';
+      if (typeof v === 'number' && Number.isFinite(v)) return String(v);
+      return "'" + String(v).replace(/'/g, "''") + "'";
+    };
+
+    const bindParams = (sql, params = []) => {
+      if (!Array.isArray(params) || params.length === 0) return sql;
+      if (/\\$\\d+/.test(sql)) {
+        return sql.replace(/\\$(\\d+)/g, (_, numStr) => {
+          const idx = Number(numStr) - 1;
+          return idx >= 0 && idx < params.length ? formatPgLit(params[idx]) : 'NULL';
+        });
+      }
+      let idx = 0;
+      return sql.replace(/\\?/g, () =>
+        idx < params.length ? formatPgLit(params[idx++]) : 'NULL'
+      );
+    };
+
+    const wrapDdl = (sql, schema) => {
+      const cleaned = String(sql || '').trim().replace(/;+\\s*$/, '').replace(/'/g, "''");
+      if (schema && schema !== 'public' && !/^\\s*CREATE\\s+SCHEMA\\b/i.test(sql)) {
+        const safeSc = String(schema).replace(/"/g, '""').replace(/'/g, "''");
+        return 'DO LANGUAGE plpgsql $$ BEGIN EXECUTE \\'SET LOCAL search_path TO "' + safeSc + '", public\\'; EXECUTE \\'' + cleaned + '\\'; END $$';
+      }
+      return "DO LANGUAGE plpgsql $$ BEGIN EXECUTE '" + cleaned + "'; END $$";
+    };
+
+    const parseTcbResp = (resp) => {
+      const rs = resp?.ResultSet || resp || {};
+      const cols = Array.isArray(rs?.Columns) ? rs.Columns : [];
+      const types = Array.isArray(rs?.ColumnTypes) ? rs.ColumnTypes : [];
+      const rawRows = Array.isArray(rs?.Rows) ? rs.Rows : [];
+      const rows = rawRows.map((rowItem) => {
+        const arr = typeof rowItem === 'string' ? JSON.parse(rowItem) : rowItem;
+        const obj = {};
+        cols.forEach((rawCol, i) => {
+          const col = typeof rawCol === 'object' && rawCol !== null ? rawCol.Name || rawCol.name || String(i) : String(rawCol);
+          const val = arr[i];
+          const t = String(types[i] || rawCol?.Type || '').toLowerCase();
+          if (val === null || val === undefined) obj[col] = null;
+          else if (t === 'int2' || t === 'int4' || t === 'int8' || t === 'float4' || t === 'float8') {
+            const num = Number(val);
+            obj[col] = Number.isSafeInteger(num) || t.startsWith('float') ? num : val;
+          } else if (t === 'bool' || t === 'boolean') {
+            obj[col] = val === true || val === 'true' || val === 't' || val === '1';
+          } else if (t === 'json' || t === 'jsonb') {
+            try {
+              obj[col] = typeof val === 'string' ? JSON.parse(val) : val;
+            } catch {
+              obj[col] = val;
+            }
+          } else {
+            obj[col] = val;
+          }
+        });
+        return obj;
+      });
+      return {
+        rows,
+        rowsAffected: Number(resp?.AffectedRows ?? rs?.AffectedRows ?? rows.length),
+        lastInsertRowid: rows[0]?.id !== undefined ? rows[0].id : null,
+      };
+    };
+
+    const callTcbExecutePgSql = async (rawSql, schema, retryWrap = true) => {
+      const { secretId, secretKey, token } = resolveTencentCreds();
+      if (!secretId || !secretKey) {
+        throw new Error('CloudBase ExecutePGSql missing Tencent Cloud credentials (MYSHIP_DATA_SECRET_ID / TENCENTCLOUD_SECRETID).');
+      }
+      const trimmed = String(rawSql || '').trim();
+      const applySc =
+        schema &&
+        schema !== 'public' &&
+        !/^\\s*CREATE\\s+SCHEMA\\b/i.test(trimmed) &&
+        !/\\bsearch_path\\b/i.test(trimmed) &&
+        !/^\\s*DO\\s+LANGUAGE\\s+plpgsql\\b/i.test(trimmed);
+      const safeSc = applySc ? String(schema).replace(/"/g, '""') : '';
+      const effectiveSql = applySc ? 'SET search_path TO "' + safeSc + '", public; ' + trimmed : trimmed;
+
+      const service = 'tcb';
+      const host = 'tcb.tencentcloudapi.com';
+      const action = 'ExecutePGSql';
+      const version = '2018-06-08';
+      const timestamp = Math.floor(Date.now() / 1000);
+      const date = new Date(timestamp * 1000).toISOString().slice(0, 10);
+      const bodyStr = JSON.stringify({ EnvId: tcbEnvId, Sql: effectiveSql });
+      const contentType = 'application/json; charset=utf-8';
+      const canonicalHeaders = 'content-type:' + contentType + '\\nhost:' + host + '\\nx-tc-action:' + action.toLowerCase() + '\\n';
+      const signedHeaders = 'content-type;host;x-tc-action';
+      const canonicalRequest = ['POST', '/', '', canonicalHeaders, signedHeaders, sha256HexStr(bodyStr)].join('\\n');
+      const credentialScope = date + '/' + service + '/tc3_request';
+      const stringToSign = ['TC3-HMAC-SHA256', String(timestamp), credentialScope, sha256HexStr(canonicalRequest)].join('\\n');
+      const secretDate = hmacSha256Buf('TC3' + secretKey, date);
+      const secretService = hmacSha256Buf(secretDate, service);
+      const secretSigning = hmacSha256Buf(secretService, 'tc3_request');
+      const signature = hmacSha256Hex(secretSigning, stringToSign);
+      const authorization = 'TC3-HMAC-SHA256 Credential=' + secretId + '/' + credentialScope + ', SignedHeaders=' + signedHeaders + ', Signature=' + signature;
+      const headers = {
+        Authorization: authorization,
+        'Content-Type': contentType,
+        Host: host,
+        'X-TC-Action': action,
+        'X-TC-Version': version,
+        'X-TC-Region': tcbRegion,
+        'X-TC-Timestamp': String(timestamp),
+      };
+      if (token) headers['X-TC-Token'] = token;
+
+      const apiEndpoint = process.env.TCB_API_ENDPOINT || 'https://tcb.tencentcloudapi.com/';
+      try {
+        const res = await fetch(apiEndpoint, { method: 'POST', headers, body: bodyStr });
+        const data = await res.json();
+        if (data.Response && data.Response.Error) {
+          throw new Error('CloudBase ExecutePGSql failed (' + data.Response.Error.Code + '): ' + data.Response.Error.Message);
+        }
+        return data.Response || data;
+      } catch (err) {
+        if (retryWrap && ddlKeywordsRe.test(trimmed)) {
+          return callTcbExecutePgSql(wrapDdl(trimmed, schema), null, false);
+        }
+        throw err;
+      }
+    };
+
+    const runTcb = async (sql, params = []) => {
+      const bound = bindParams(sql, params);
+      const resp = await callTcbExecutePgSql(bound, tcbSchema, true);
+      return parseTcbResp(resp);
+    };
+
+    return withCloudAliases({
+      provider: 'cloudbase-pg',
+      envId: tcbEnvId,
+      schema: tcbSchema,
+      async execute(sql, params = []) { return runTcb(sql, params); },
+      async query(sql, params = []) {
+        const r = await runTcb(sql, params);
+        return attachMeta(r.rows, r.rowsAffected, r.lastInsertRowid);
+      },
+      async batch(stmts = []) {
+        const out = [];
+        for (const s of stmts) {
+          const sql = typeof s === 'string' ? s : Array.isArray(s) ? s[0] : s.sql;
+          const params = typeof s === 'string' ? [] : Array.isArray(s) ? s[1] || [] : s.params || [];
+          out.push(await runTcb(sql, params));
+        }
+        return out;
+      },
+    });
+  }
+
+  // 原生 PostgreSQL (pg.Pool) 云端运行通道
+  if (
+    (!explicitProv || explicitProv === 'pg' || explicitProv === 'postgres') &&
+    !process.env.TCB_ENV_ID &&
+    (process.env.DATABASE_URL || process.env.PGHOST)
+  ) {
+    const connStr = process.env.DATABASE_URL || '';
+    const activeSchema = process.env.PG_SCHEMA || null;
+    let poolPromise = null;
+    const toPgPositional = (sql, params = []) => {
+      if (!Array.isArray(params) || params.length === 0 || !sql.includes('?') || /\\$\\d+/.test(sql)) {
+        return sql;
+      }
+      let idx = 0;
+      return sql.replace(/\\?/g, () => '$' + (++idx));
+    };
+    const getPgPool = async () => {
+      if (!poolPromise) {
+        poolPromise = (async () => {
+          const pgMod = await import('pg');
+          const PoolCtor = pgMod.default?.Pool || pgMod.Pool;
+          let isLocalHost = false;
+          let isPoolerHost = false;
+          let sslDisabled = false;
+          let cleanConnStr = connStr;
+          if (connStr) {
+            try {
+              const u = new URL(connStr);
+              isLocalHost = u.hostname === '127.0.0.1' || u.hostname === 'localhost' || u.hostname === '::1';
+              isPoolerHost = u.hostname.includes('-pooler.');
+              sslDisabled = (u.searchParams.get('sslmode') || '').toLowerCase() === 'disable';
+              u.searchParams.delete('schema');
+              u.searchParams.delete('sslmode');
+              u.searchParams.delete('options');
+              cleanConnStr = u.toString();
+            } catch {}
+          } else {
+            isLocalHost = process.env.PGHOST === '127.0.0.1' || process.env.PGHOST === 'localhost' || process.env.PGHOST === '::1';
+            isPoolerHost = String(process.env.PGHOST || '').includes('-pooler.');
+          }
+          if (isPoolerHost && process.env.PGOPTIONS) {
+            delete process.env.PGOPTIONS;
+          }
+          const pool = new PoolCtor(
+            cleanConnStr
+              ? {
+                  connectionString: cleanConnStr,
+                  max: 5,
+                  ssl: isLocalHost || sslDisabled ? false : { rejectUnauthorized: false },
+                }
+              : {
+                  host: process.env.PGHOST,
+                  port: Number(process.env.PGPORT || 5432),
+                  database: process.env.PGDATABASE || 'postgres',
+                  user: process.env.PGUSER || 'postgres',
+                  password: process.env.PGPASSWORD || '',
+                  max: 5,
+                  ssl: isLocalHost ? false : { rejectUnauthorized: false },
+                }
+          );
+          pool.on('error', (err) => {
+            console.warn('[MyShip PG Pool] Idle client error:', err?.message || err);
+          });
+          return pool;
+        })();
+      }
+      return poolPromise;
+    };
+    const runPg = async (sql, params = []) => {
+      if (((connStr || '') + ' ' + (process.env.PGHOST || '')).includes('-pooler.') && process.env.PGOPTIONS) {
+        delete process.env.PGOPTIONS;
+      }
+      const pool = await getPgPool();
+      let res;
+      if (activeSchema && activeSchema !== 'public') {
+        const client = await pool.connect();
+        try {
+          const safeSc = String(activeSchema).replace(/"/g, '""');
+          await client.query('BEGIN');
+          try {
+            await client.query('SET LOCAL search_path TO "' + safeSc + '", public');
+            res =
+              Array.isArray(params) && params.length > 0
+                ? await client.query(toPgPositional(sql, params), params)
+                : await client.query(sql);
+            await client.query('COMMIT');
+          } catch (txErr) {
+            await client.query('ROLLBACK').catch(() => {});
+            throw txErr;
+          }
+        } finally {
+          client.release();
+        }
+      } else {
+        res =
+          Array.isArray(params) && params.length > 0
+            ? await pool.query(toPgPositional(sql, params), params)
+            : await pool.query(sql);
+      }
+      const rows = Array.isArray(res?.rows) ? res.rows : [];
+      return {
+        rows,
+        rowsAffected: Number(res?.rowCount ?? rows.length),
+        lastInsertRowid: rows[0]?.id !== undefined ? rows[0].id : null,
+      };
+    };
+    return withCloudAliases({
+      provider: 'pg',
+      url: connStr || ('postgresql://' + process.env.PGHOST + ':' + (process.env.PGPORT || 5432) + '/' + (process.env.PGDATABASE || 'postgres')),
+      schema: activeSchema,
+      async execute(sql, params = []) { return runPg(sql, params); },
+      async query(sql, params = []) {
+        const r = await runPg(sql, params);
+        return attachMeta(r.rows, r.rowsAffected, r.lastInsertRowid);
+      },
+      async batch(stmts = []) {
+        const out = [];
+        for (const s of stmts) {
+          const sql = typeof s === 'string' ? s : Array.isArray(s) ? s[0] : s.sql;
+          const params = typeof s === 'string' ? [] : Array.isArray(s) ? s[1] || [] : s.params || [];
+          out.push(await runPg(sql, params));
+        }
+        return out;
+      },
+    });
+  }
+
+  // 原生 MySQL (mysql2/promise) 云端运行通道
+  const mysqlConnUrl =
+    process.env.MYSQL_URL ||
+    (explicitProv === 'mysql' && process.env.DATABASE_URL ? process.env.DATABASE_URL : '');
+  if ((!explicitProv || explicitProv === 'mysql') && mysqlConnUrl) {
+    let mysqlPoolPromise = null;
+    const getMysqlPool = async () => {
+      if (!mysqlPoolPromise) {
+        mysqlPoolPromise = (async () => {
+          const mysqlMod = await import('mysql2/promise');
+          const createPoolFn = mysqlMod.default?.createPool || mysqlMod.createPool;
+          return createPoolFn({ uri: mysqlConnUrl, connectionLimit: 5 });
+        })();
+      }
+      return mysqlPoolPromise;
+    };
+    const runMysql = async (sql, params = []) => {
+      const pool = await getMysqlPool();
+      const [result] =
+        Array.isArray(params) && params.length > 0
+          ? await pool.execute(sql, params)
+          : await pool.query(sql);
+      if (Array.isArray(result)) {
+        return {
+          rows: result,
+          rowsAffected: result.length,
+          lastInsertRowid: result[0]?.id !== undefined ? result[0].id : null,
+        };
+      }
+      return {
+        rows: [],
+        rowsAffected: Number(result?.affectedRows ?? 0),
+        lastInsertRowid: result?.insertId !== undefined ? Number(result.insertId) : null,
+      };
+    };
+    return withCloudAliases({
+      provider: 'mysql',
+      url: mysqlConnUrl,
+      async execute(sql, params = []) { return runMysql(sql, params); },
+      async query(sql, params = []) {
+        const r = await runMysql(sql, params);
+        return attachMeta(r.rows, r.rowsAffected, r.lastInsertRowid);
+      },
+      async batch(stmts = []) {
+        const out = [];
+        for (const s of stmts) {
+          const sql = typeof s === 'string' ? s : Array.isArray(s) ? s[0] : s.sql;
+          const params = typeof s === 'string' ? [] : Array.isArray(s) ? s[1] || [] : s.params || [];
+          out.push(await runMysql(sql, params));
+        }
+        return out;
+      },
+    });
+  }
+
+  return withCloudAliases({
+    provider: process.env.DATABASE_URL ? 'pg' : 'unconfigured',
+    url: process.env.DATABASE_URL || null,
+    schema: process.env.PG_SCHEMA || null,
+    async execute() {
+      throw new Error(
+        process.env.DATABASE_URL
+          ? 'PostgreSQL (DATABASE_URL) 已注入环境变量，请使用 pg / postgres / Drizzle 连接 process.env.DATABASE_URL。'
+          : '未配置云端数据库。请先运行 "myship use db --provider <turso|d1|neon|pg>" 注册数据库。'
+      );
+    },
+    async query(sql, params) { return this.execute(sql, params); },
+    async batch(stmts) { return this.execute(stmts); },
+  });
+}
+
+const { storage, files } = createCloudStorage();
+const db = createCloudDbClient();
 globalThis.myshipStorage = storage;
+globalThis.myshipFiles = files;
+globalThis.myshipDb = db;
 
 const RECENT_LOGS = [];
 const MAX_RECENT_LOGS = 100;
@@ -648,6 +2282,9 @@ const server = http.createServer(async (req, res) => {
       query: Object.fromEntries(url.searchParams),
       env: process.env,
       storage,
+      files,
+      bucket: files,
+      db,
       clientIp: req.headers['x-myship-client-ip'] || req.headers['x-forwarded-for'] || '127.0.0.1',
     };
 
@@ -1091,7 +2728,26 @@ export async function bundleScfBackend({
     collectStaticAssetsRecursive(dirAbs);
   }
 
-  const bootstrapJsCode = generateBootstrapRuntimeSource(bootstrapUserEntryImport);
+  const rawBootstrapJs = generateBootstrapRuntimeSource(bootstrapUserEntryImport);
+  const cliDir = dirname(fileURLToPath(import.meta.url));
+  const bootstrapBuildResult = await esbuild.build({
+    stdin: {
+      contents: rawBootstrapJs,
+      resolveDir: cliDir,
+      sourcefile: '_myship_bootstrap.mjs',
+      loader: 'js',
+    },
+    absWorkingDir: cliDir,
+    bundle: true,
+    platform: 'node',
+    target: 'node20',
+    format: 'esm',
+    banner: { js: bannerJs },
+    external: [bootstrapUserEntryImport, 'pg-native'],
+    write: false,
+    logLevel: 'silent',
+  });
+  const bootstrapJsCode = bootstrapBuildResult.outputFiles[0].text;
   const scfBootstrapSh = [
     '#!/bin/bash',
     'for d in /var/lang/node24*/bin /var/lang/node22*/bin /var/lang/node20*/bin /var/lang/node18*/bin /var/lang/node16*/bin; do',
@@ -1122,6 +2778,7 @@ export async function bundleScfBackend({
     externalPackages,
     zipEntries: zipFiles.map((z) => z.name),
     appBundleCode,
+    bootstrapJsCode,
     zipBuffer,
     zipSizeBytes: zipBuffer.length,
   };

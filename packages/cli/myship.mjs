@@ -61,12 +61,14 @@ import {
   runBackendCommand,
   fetchAndPrintScfLogs,
 } from './scf-client.mjs';
+import { runUseCommand } from './resource-manager.mjs';
 
 export * from './project-context.mjs';
 export * from './env-manager.mjs';
 export * from './serverless.mjs';
 export * from './scf-bundler.mjs';
 export * from './scf-client.mjs';
+export * from './resource-manager.mjs';
 export * from './core-cas.mjs';
 export * from './lifecycle.mjs';
 export * from './dev-server.mjs';
@@ -222,6 +224,18 @@ function printWhoami() {
         : '⚪ 未开启 (可执行 `myship backend enable` 按需开启)'
     }`
   );
+  console.log(
+    `  🧩 已注册云资源:        ${
+      proj.resources && (proj.resources.storage?.enabled || proj.resources.db?.enabled)
+        ? [
+            proj.resources.storage?.enabled ? `storage(${proj.resources.storage.filesPrefix})` : null,
+            proj.resources.db?.enabled ? `db(${proj.resources.db.provider})` : null,
+          ]
+            .filter(Boolean)
+            .join(', ')
+        : '⚪ 未声明 (可执行 `myship use <storage|db>` 一键注入)'
+    }`
+  );
   console.log(`  📄 配置来源:            ${proj.configSource}`);
 }
 
@@ -233,6 +247,13 @@ function printHelp() {
   myship                                       零参数部署：自动发布前端与后端新版本并更新 <project>.ship.<domain>
   myship <目录> <环境后缀>                     项目内带后缀部署：如在 app1 下执行 myship ./dist v2 -> https://app1-v2.ship.<domain>
   myship -d <环境后缀> [-p <项目名>]           部署并自动拼接当前项目命名空间前缀 (加 --raw 可不加项目前缀)
+
+声明式资源注册与交互式引导 (myship use):
+  myship use                                   ✨ 交互式选择向导 (上下方向键 / 数字键选择数据库或对象存储)
+  myship use db                                ✨ 交互式选择数据库平台 (自动扫描腾讯云 CloudBase PG 环境，免输参数)
+  myship use storage [--env prod|staging]      一键为当前项目注册并注入 COS 对象存储 (context.storage + context.files)
+  myship use status                            查看当前项目已绑定的存储与数据库资源状态
+  myship use db --provider <pg|neon|turso|d1|mysql> 非交互式脚本/CI 指定数据库底座与凭证参数
 
 全栈业务后端 (腾讯云 SCF) 渐进式开关与日志:
   myship backend enable [--entry server/index.mjs] 开启当前项目的腾讯云 SCF 全栈 Node.js 后端开关 (含权限与服务开通预检向导)
@@ -406,6 +427,15 @@ if (isMainModule) {
         region: explicitRegion,
         entry: explicitEntry,
         role: explicitRole,
+        isLocal,
+      });
+      return;
+    }
+    if (first === 'use' || first === 'resource' || first === 'resources') {
+      await runUseCommand({
+        args: rawArgs.slice(1),
+        cwd: process.cwd(),
+        explicitProject,
         isLocal,
       });
       return;

@@ -40,6 +40,7 @@ import {
   bundleScfBackend,
   createLocalPersistentStorage,
 } from './scf-bundler.mjs';
+import { resolveProjectResourceEnv } from './resource-manager.mjs';
 
 function sha256HexStr(str) {
   return createHash('sha256').update(str, 'utf8').digest('hex');
@@ -574,8 +575,10 @@ export async function deployScfBackendVersion({
     );
   }
 
+  const resourceEnv = resolveProjectResourceEnv(cwd, cleanProj);
   const mergedEnvMap = {
     NODE_ENV: 'production',
+    ...resourceEnv,
     ...envVars,
     MYSHIP_PROJECT: cleanProj,
     MYSHIP_GATEWAY_TOKEN: gatewayToken,

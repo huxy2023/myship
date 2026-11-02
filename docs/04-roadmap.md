@@ -25,7 +25,8 @@ flowchart LR
     P0["✅ Phase 0 (已完成)<br/>CAS 核心引擎 + EdgeOne 泛域名 HTTPS"] --> P1["✅ Phase 1 (已完成)<br/>.myship 项目命名空间 + 免依赖全局 CLI + Clarify 文档站"]
     P1 --> P2["✅ Phase 2 (已完成)<br/>约定式云函数 (api/*.js) + 私有环境变量 (myship env) + 本地开发 (myship dev)"]
     P2 --> P3["✅ Phase 3 (已完成)<br/>CAS GC 回收器 + Git PR 预览 + Web 可视化管控台 (myship console)"]
-    P3 --> P4["🧭 Phase 4 (全栈渐进演进)<br/>多文件依赖打包 + 零月租 COS KV/Storage + 数据库双轨接入"]
+    P3 --> P4["✅ Phase 4 (已完成 · v0.2.0)<br/>SCF Web 函数全栈后端 + esbuild 内联 SourceMap + context.storage"]
+    P4 --> P5["🚀 Phase 5 (进行中)<br/>声明式资源注册与注入 (myship use: COS Files + Turso / D1 / Neon / CloudBase PG)"]
 ```
 
 ---
@@ -80,22 +81,46 @@ flowchart LR
 
 ---
 
-## 五、Phase 4 渐进式全栈后端能力演进（对标 Vercel 全栈体验，按需克制迭代）
+## 五、Phase 4 全栈 Node.js 后端与不可变版本路由（✅ 已完成 · `v0.2.0`）
 
-遵循**“个人开发者 BYOC、零固定月租、不搞一步到位的大而全重构”**原则，后续后端与有状态能力按以下三个递进阶段按需迭代：
+遵循**“强契约、克制设计、零固定月租”**原则，Phase 4 落地了基于腾讯云 SCF Web 函数的完整 Node.js 全栈能力：
 
-### 1. Stage 4.1（工程化提效）：云函数本地模块与轻量依赖打包 (Function Bundling)
-- **痛点**：当前 `api/*.js` 为单文件零依赖转换，不支持 `import { auth } from './_utils.js'` 跨文件复用公共代码或引入纯 JS 轻量 npm 包（如 `zod`、`jose`）。
-- **演进方案**：在 `myship` 部署与 `myship dev` 中支持将 `api/*.js` 引用的本地相对路径模块（约定以 `_` 开头的文件如 `api/_utils.js` 不单独暴露为路由）与纯 V8 兼容的轻量 npm 依赖打包为单文件后再注入边缘函数。
+1. **显式开启的全栈后端开关 (`myship backend enable`)**：
+   - 未开启时保持 100% 纯静态 CAS 零损耗心智；开启后支持单入口 Web Fetch / Hono（如 `server/index.mjs`）或多路由 `api/*.mjs`。
+2. **工业级 `esbuild` 单包打包 + 原生内联 SourceMap**：
+   - 采用 `esbuild`（`bundle: true, format: 'esm', platform: 'node', sourcemap: 'inline'`）结合 `node --enable-source-maps` 与 `process.setSourceMapsEnabled(true)`，自动递归保留 `server/` 下静态资产文件，报错堆栈精准定位至源码真实文件与行号。
+3. **内置私有状态存储 (`context.storage`) 与日志诊断 (`myship logs`)**：
+   - 基于 COS 私有前缀 `data/<project>/<key>.json`（`x-cos-acl: private`）封装 `context.storage.get/set/delete/list`，本地 `myship dev` 自动映射至 `.myship/data/<project>/`；`myship logs` 聚合云端 SCF 日志与私有异常归档。
+4. **不可变版本发布与 8 版本统一保留策略**：
+   - 每次部署自动发布不可变 SCF 版本与专属 HTTP 触发器，在 `manifests/dpl_<id>.json` 中绑定 `backend.upstreamUrl`，并统一维护项目级 8 版本上限（活跃别名锁定版本 + 最新预览版本），支持前后端原子秒级回滚。
 
-### 2. Stage 4.2（零额外云成本的有状态存储）：内置 `context.kv` 与 `context.storage`
-- **痛点**：个人小项目常需存储少量 JSON 状态（留言、配置开关、短链映射）或用户上传的文件，单独购买云 Redis 实例固定月租过高，且边缘函数受 1MB 请求体限制无法直接中转大文件。
-- **演进方案（100% 复用现有 COS 存储桶，零新增固定成本）**：
-  - **轻量键值存储 (`context.kv`)**：基于 COS 私有路径 `kv/<project>/<key>.json`（`x-cos-acl: private`）封装 `await context.kv.get(key)` / `set(key, value)` / `delete(key)`，按项目命名空间严格隔离。
-  - **对象存储与前端直传预签名 (`context.storage`)**：封装 `await context.storage.put(path, body)` 与 `context.storage.presignPutUrl(path, expiresSec)`，让前端可凭预签名 URL 直传大文件至 `storage/<project>/*`，绕开边缘函数 1MB 请求体限制。
+---
 
-### 3. Stage 4.3（重算力与关系型数据库）：数据库双轨接入 + 腾讯云 SCF 自动发布
-- **路线 A（轻量首选 · 边缘 V8 + HTTP Serverless 数据库）**：
-  - 针对纯 V8 沙盒不支持原生 TCP Socket 的特性，推荐配合支持 HTTP/WebSocket 协议的 Serverless 数据库（如 Neon Postgres、Supabase、Turso SQLite、Upstash），通过 `myship env set DATABASE_URL=...` 注入连接串，实现 0 冷启动、0 固定月租的数据读写。
-- **路线 B（重算力突围 · 方案 C 腾讯云 SCF Node.js 自动打包发布）**：
-  - 针对需要完整 Node.js 运行时、长耗时任务（AI 推理流、定时爬虫）或原生 TCP 连接传统 MySQL/PostgreSQL 的接口，基于已预留的 `upstreamUrl` 边缘反向代理扩展槽，在 CLI 中补齐将指定 `api/*.scf.js` 自动打包发布至腾讯云 SCF 并回填函数 URL 的闭环。
+## 六、Phase 5 声明式资源注册与自动注入引擎 (`myship use` · 进行中)
+
+面向个人与全栈开发高频刚需，提供**“一次配置全局底座，任何新项目一行 `myship use` 即刻注入对象存储与数据库”**的极简资源编排体验，并遵循**“前期宽松共享、后期无缝收紧 (`isolation: 'shared' | 'strict'`)”**的演进架构：
+
+### 1. 对象存储声明与注入 (`myship use storage` / `myship use files`)
+- **隔离模型**：复用全局 COS 存储桶，通过**项目路径前缀（Object Path Prefix）**天然隔离：
+  - JSON 键值状态：`data/<project>/<key>.json`（通过 `context.storage` 访问）
+  - 二进制文件存储：`files/<project>/<key>`（通过新增的 **`context.files`** / `context.bucket` 访问，支持 `put`、`get`、`delete`、`list` 及免经过云函数的 **COS 预签名直传/下载 `presignUrl`**）
+- **环境策略**：默认采用 **2 环境模型**（本地 `myship dev` 读写 `.myship/files/<project>/`，云端读写 COS `files/<project>/`），同时预留 `MYSHIP_STORAGE_ENV` 环境变量支持按需切分子环境前缀（`files/<project>/<env>/`）。
+
+### 2. 五大数据库声明与自动注入 (`myship use db [--provider <turso|d1|neon|pg|mysql>]`)
+采用行业标准的 **2 环境默认模型（Local 本地开发 + Prod 云端生产，可选 `--env staging` 测试环境）**，支持**全局默认数据库平台 (`defaultDbProvider`) + 多平台凭证并存 + 项目级按需覆盖**，原生兼容五大数据库：
+
+| 数据库类型 | 适用场景 | 隔离与自动开通机制 | 运行时使用方式 |
+| :--- | :--- | :--- | :--- |
+| **Turso (Edge SQLite)** | 个人全栈 / 边缘低延迟 SQLite / 零固定月租 | 全局配置一次 `tursoApiToken` + `tursoOrg`，执行 `myship use db --provider turso` 自动调用 Turso API 创建 `myship-<project>` 独立库并签发项目专属 Token | 直接调用内置零依赖 `await context.db.query(sql, params)` / `execute(sql, params)` / `batch(stmts)`（或读取 `TURSO_DATABASE_URL`） |
+| **Cloudflare D1 (Serverless SQLite)** | 已有 Cloudflare 账号 / 标准 SQLite 生态 | 全局配置一次 `cfAccountId` + `cfApiToken`，执行 `myship use db --provider d1` 自动调用 Cloudflare API 查找或创建 `myship-<project>` D1 数据库 | 直接调用内置零依赖 `await context.db.query(sql, params)` / `execute(sql, params)` / `batch(stmts)`（底层直连 D1 HTTP API） |
+| **Neon (Serverless PostgreSQL)** | 零月租 Serverless PG / 原生 HTTP SQL + 分支生态 | 支持：① 配置全局 `neonApiKey` 自动通过 Neon API v2 创建项目专属逻辑库 `myship_<project>`；或 ② 配置全局 `neonMasterUrl` 自动按项目派生独立 Schema (`myship_<project>`) | **双模支持**：既可直接调用内置零依赖 `await context.db.query(sql, params)`（底层直连 Neon Serverless HTTP `/sql` 接口），也可通过 `DATABASE_URL` 对接 Drizzle / Prisma / `@neondatabase/serverless` |
+| **腾讯云 CloudBase PG / 原生 PostgreSQL (`pg`)** | 同云低延迟 / 专业自建 PG / Prisma & Drizzle 生态 | 全局配置一次 `pgMasterUrl`，执行 `myship use db --provider pg` 自动为项目派生独立 Schema（或 `--isolate db` 独立库名，或 `--raw` 直连自定义库） | 自动注入标准 `process.env.DATABASE_URL` 与 `PG_SCHEMA`，无缝对接 `pg`、`postgres`、Drizzle、Prisma |
+| **原生 MySQL / MariaDB / TiDB (`mysql`)** | 专业开发者自建或云端 MySQL / TDSQL-C MySQL | 全局配置一次 `mysqlMasterUrl`，执行 `myship use db --provider mysql` 自动按项目派生独立数据库名 `myship_<project>`（或 `--raw` 直连现有自定义 MySQL 库） | 自动注入标准 `process.env.DATABASE_URL`、`MYSQL_URL` 与 `MYSQL_DATABASE`，无缝对接 `mysql2/promise`、Drizzle、Prisma |
+
+- **本地开发 (`myship dev`) 100% 零依赖同构**：
+  - 本地开发时，`context.db` 自动调用 **Node.js 22+ 原生内置 `node:sqlite` (`DatabaseSync`)** 读写 `.myship/data/<project>/local.sqlite`，无需安装任何 C++ 编译依赖即可在本地执行与云端 Turso / D1 完全一致的 SQL 读写。
+
+### 3. “前期宽松、后期严格”的凭证演进留白 (`isolation: 'shared' | 'strict'`)
+- 在 `.myship/project.json` 的 `resources` 字段中记录资源声明与 `isolation` 级别（默认 `"shared"`）。
+- **前期 (`shared`)**：用户只需在 `~/.myship/config.json` 配置一次全局凭证，所有项目执行 `myship use` 时自动共享底层连接并按 `project` 前缀 / Schema / 独立库隔离。
+- **后期 (`strict`)**：当某个项目需要商业化或团队协作时，仅需切换为 `--strict`，由 CLI 自动签发仅限 `files/<project>/*` 的 CAM 子密钥或仅限 `myship_<project>` Schema 的独立数据库账号并替换环境变量，**业务代码 0 行改动**。

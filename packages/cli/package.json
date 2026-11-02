@@ -1,6 +1,6 @@
 {
   "name": "@myship/cli-core",
-  "version": "0.1.1",
+  "version": "0.3.0",
   "license": "MIT",
   "type": "module",
   "description": "MyShip — Zero-dependency CAS deployment & wildcard routing CLI",
@@ -17,5 +17,9 @@
   },
   "engines": {
     "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "mysql2": "^3.24.6",
+    "pg": "^8.23.1"
   }
 }
