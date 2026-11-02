@@ -2,842 +2,78 @@
 /**
  * myship.mjs — 个人级极致 DX 部署与泛域名路由 CLI (BYOC 开源版)
  *
- * 核心特性：
- * 1. 项目级命名空间隔离 (.myship/project.json)：
- *    - 自动将不同项目 (如 app1、app2) 隔离到各自的域名前缀：
- *      app1 -> https://app1.ship.example.com, https://app1-v1.ship.example.com, https://app1-<hash>.ship.example.com
- *      app2 -> https://app2.ship.example.com, https://app2-v1.ship.example.com, https://app2-<hash>.ship.example.com
- *    - 在项目目录下执行 `myship ls` 默认只展示当前项目的版本与域名；加 `--all` 按项目分组展示全局总览。
- * 2. 极简命令语法：支持 `myship` (零参数自动部署)、`myship ./dist v1`、`myship rollback` (零参数回滚当前项目主域名)
- * 3. BYOC 自带云底座辅助：支持 `myship login`、`myship whoami` 与 `myship build-edge-fn` (一键生成注入个人 COS 地址的边缘函数)
- * 4. CAS 内容寻址去重 + 永久不可变快照 + 0 秒原子切流与回滚
+ * 模块化门面与 CLI 主入口：
+ * - project-context.mjs : 项目命名空间探测、路径规范化与统一 CAS 状态快照加载
+ * - core-cas.mjs        : 本地沙盒与云端 COS 增量去重部署、别名切流、回滚、状态列表
+ * - lifecycle.mjs       : 按数量/时间垃圾回收 (gc) 与资源主动销毁 (rm / purge)
+ * - serverless.mjs      : 约定式 api/*.js 扫描、安全合规校验、ESM 编译与 EdgeOne 同步
+ * - env-manager.mjs     : 项目级云函数环境变量解析、脱敏与私有存储
+ * - dev-server.mjs      : myship dev 本地全栈热重载开发服务器
+ * - ci-generator.mjs    : myship init --ci GitHub Actions 工作流生成与 Secrets 同步
+ * - console-server.mjs  : myship console 轻量单页 Web 可视化管控台后端与 Diff 引擎
+ * - console-ui.mjs      : myship console 单页前端视图模板
+ * - cos-client.mjs      : 腾讯云 COS V5 XML 签名客户端与 EdgeOne OpenAPI 驱动
  */
-import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import {
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  statSync,
-  writeFileSync,
-  existsSync,
-  realpathSync,
-} from 'node:fs';
-import { resolve, relative, extname, dirname, basename } from 'node:path';
+import { readFileSync, existsSync, realpathSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import {
-  cosHeadObject,
-  cosPutObject,
-  cosGetJson,
   cosListKeys,
   getEffectiveEndpoints,
-  assertCloudEndpointsConfigured,
   getAuthStatus,
   saveMyShipFileConfig,
   loadTencentCredentials,
   MYSHIP_CONFIG_PATH,
-  MYSHIP_GLOBAL_EDGE_FN_PATH,
   probeEdgeGateway,
-  deployEdgeFunctionToTeo,
 } from './cos-client.mjs';
+import {
+  normalizeDomainToken,
+  detectProjectContext,
+  ensureProjectConfig,
+  resolveNamespacedSubdomain,
+} from './project-context.mjs';
+import {
+  generateEdgeFunctionCode,
+  promptAndDeployEdgeFunction,
+  runEnvCommand,
+} from './serverless.mjs';
+import {
+  deployDirectory,
+  setAlias,
+  rollbackAlias,
+  listState,
+  deployRemoteDirectory,
+  setRemoteAlias,
+  rollbackRemoteAlias,
+  listRemoteState,
+} from './core-cas.mjs';
+import {
+  gcState,
+  gcRemoteState,
+  removeResources,
+} from './lifecycle.mjs';
+import { startDevServer } from './dev-server.mjs';
+import { setupCiWorkflow } from './ci-generator.mjs';
+import { startConsoleServer } from './console-server.mjs';
+import {
+  runBackendCommand,
+  fetchAndPrintScfLogs,
+} from './scf-client.mjs';
+
+export * from './project-context.mjs';
+export * from './env-manager.mjs';
+export * from './serverless.mjs';
+export * from './scf-bundler.mjs';
+export * from './scf-client.mjs';
+export * from './core-cas.mjs';
+export * from './lifecycle.mjs';
+export * from './dev-server.mjs';
+export * from './ci-generator.mjs';
+export * from './console-server.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-export const DEFAULT_STORAGE_DIR = resolve(__dirname, '.cas-storage');
-const BASE_DOMAIN = process.env.SHIP_BASE_DOMAIN || 'ship.localhost:4100';
-
-const MIME_MAP = {
-  '.html': 'text/html; charset=UTF-8',
-  '.js': 'application/javascript; charset=UTF-8',
-  '.mjs': 'application/javascript; charset=UTF-8',
-  '.css': 'text/css; charset=UTF-8',
-  '.json': 'application/json; charset=UTF-8',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.webp': 'image/webp',
-  '.ico': 'image/x-icon',
-  '.txt': 'text/plain; charset=UTF-8',
-  '.md': 'text/plain; charset=UTF-8',
-  '.woff': 'font/woff',
-  '.woff2': 'font/woff2',
-};
-
-const BLOCKED_DIRS = new Set([
-  '.git',
-  '.myship',
-  '.vercel',
-  '.edgeone',
-  '.ssh',
-  '.tccli',
-  'node_modules',
-  '.cas-storage',
-]);
-
-function isSensitiveEntry(entryName) {
-  const lower = entryName.toLowerCase();
-  if (lower === '.ds_store' || lower === '.npmrc' || lower === '.netrc') return true;
-  if (lower === '.env' || lower.startsWith('.env.')) return true;
-  if (
-    lower.endsWith('.pem') ||
-    lower.endsWith('.key') ||
-    lower.endsWith('.credential') ||
-    lower.endsWith('.p12') ||
-    lower.endsWith('.pfx')
-  ) {
-    return true;
-  }
-  if (lower === 'id_rsa' || lower === 'id_ed25519') return true;
-  return false;
-}
-
-export function ensureMyShipGitignore(myshipDir) {
-  mkdirSync(myshipDir, { recursive: true });
-  const gitignorePath = resolve(myshipDir, '.gitignore');
-  if (!existsSync(gitignorePath)) {
-    writeFileSync(
-      gitignorePath,
-      '# Automatically created by MyShip CLI to prevent accidental leaks\n*\n!project.json\n!.gitignore\n',
-      'utf8'
-    );
-  }
-}
-
-function ensureStorageDirs(storageDir) {
-  mkdirSync(resolve(storageDir, 'blobs'), { recursive: true });
-  mkdirSync(resolve(storageDir, 'manifests'), { recursive: true });
-  mkdirSync(resolve(storageDir, 'aliases'), { recursive: true });
-}
-
-function walkFiles(dir, baseDir = dir) {
-  const results = [];
-  for (const entry of readdirSync(dir)) {
-    if (BLOCKED_DIRS.has(entry)) {
-      continue;
-    }
-    if (isSensitiveEntry(entry)) {
-      if (entry !== '.DS_Store') {
-        console.warn(`  🛡️  [安全防泄漏] 已自动拦截并跳过敏感文件: ${entry}`);
-      }
-      continue;
-    }
-    const full = resolve(dir, entry);
-    const stat = statSync(full);
-    if (stat.isDirectory()) {
-      results.push(...walkFiles(full, baseDir));
-    } else if (stat.isFile()) {
-      const relPath = '/' + relative(baseDir, full).split('\\').join('/');
-      results.push({ fullPath: full, relPath, size: stat.size });
-    }
-  }
-  return results.sort((a, b) => a.relPath.localeCompare(b.relPath));
-}
-
-function sha256Hex(buffer) {
-  return createHash('sha256').update(buffer).digest('hex');
-}
-
-export function normalizeDomainToken(raw) {
-  if (!raw) return '';
-  return String(raw)
-    .trim()
-    .toLowerCase()
-    .replace(/^https?:\/\//, '')
-    .replace(/\/.*$/, '')
-    .replace(/^@[^/]+\//, '')
-    .replace(/[^a-z0-9-]/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '');
-}
-
-export function normalizeSubdomain(input) {
-  if (!input) return '';
-  let s = String(input).trim().toLowerCase();
-  s = s.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
-  const { remoteDomain } = getEffectiveEndpoints();
-  if (remoteDomain && s.endsWith(`.${remoteDomain}`)) {
-    s = s.slice(0, -(remoteDomain.length + 1));
-  }
-  if (s.endsWith(`.${BASE_DOMAIN}`)) {
-    s = s.slice(0, -(BASE_DOMAIN.length + 1));
-  }
-  return s.split('.')[0];
-}
-
-// ============================================================================
-// 项目级命名空间与配置探测器 (.myship/project.json)
-// ============================================================================
-export function detectProjectContext(cwd = process.cwd(), explicitProject = null) {
-  const myshipDir = resolve(cwd, '.myship');
-  const projectJsonPath = resolve(myshipDir, 'project.json');
-  const legacyMyshipJson = resolve(cwd, '.myship.json');
-  const pkgJsonPath = resolve(cwd, 'package.json');
-
-  let savedCfg = null;
-  let configSource = null;
-
-  if (existsSync(projectJsonPath)) {
-    try {
-      savedCfg = JSON.parse(readFileSync(projectJsonPath, 'utf8'));
-      configSource = '.myship/project.json';
-    } catch {
-      // ignore
-    }
-  } else if (existsSync(legacyMyshipJson)) {
-    try {
-      savedCfg = JSON.parse(readFileSync(legacyMyshipJson, 'utf8'));
-      configSource = '.myship.json';
-    } catch {
-      // ignore
-    }
-  }
-
-  let inferredName = explicitProject || savedCfg?.project || savedCfg?.domain || '';
-  if (!inferredName && existsSync(pkgJsonPath)) {
-    try {
-      const pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf8'));
-      if (pkg.name) inferredName = pkg.name;
-    } catch {
-      // ignore
-    }
-  }
-  if (!inferredName) {
-    inferredName = basename(cwd);
-  }
-  const project = normalizeDomainToken(inferredName) || 'app';
-
-  let buildDir = savedCfg?.dir || null;
-  if (!buildDir) {
-    const candidates = ['./dist', './build', './out', './public'];
-    for (const c of candidates) {
-      const abs = resolve(cwd, c);
-      if (existsSync(abs) && statSync(abs).isDirectory()) {
-        buildDir = c;
-        break;
-      }
-    }
-  }
-
-  const prodDomain = normalizeDomainToken(savedCfg?.prodDomain || project) || project;
-
-  return {
-    project,
-    buildDir: buildDir || './dist',
-    prodDomain,
-    hasSavedConfig: Boolean(savedCfg),
-    configSource: configSource || '自动推断 (package.json / 目录名)',
-    projectJsonPath,
-    myshipDir,
-  };
-}
-
-export function ensureProjectConfig(cwd = process.cwd(), overrides = {}) {
-  const ctx = detectProjectContext(cwd, overrides.project);
-  ensureMyShipGitignore(ctx.myshipDir);
-  const payload = {
-    project: overrides.project ? normalizeDomainToken(overrides.project) : ctx.project,
-    dir: overrides.dir || ctx.buildDir || './dist',
-    prodDomain: overrides.prodDomain
-      ? normalizeDomainToken(overrides.prodDomain)
-      : overrides.project
-      ? normalizeDomainToken(overrides.project)
-      : ctx.prodDomain,
-    updatedAt: new Date().toISOString(),
-  };
-  writeFileSync(ctx.projectJsonPath, JSON.stringify(payload, null, 2), 'utf8');
-  return { ...ctx, ...payload, hasSavedConfig: true, configSource: '.myship/project.json' };
-}
-
-function appendLocalProjectHistory(cwd, entry) {
-  try {
-    const myshipDir = resolve(cwd, '.myship');
-    ensureMyShipGitignore(myshipDir);
-    const historyPath = resolve(myshipDir, 'history.json');
-    let list = [];
-    if (existsSync(historyPath)) {
-      list = JSON.parse(readFileSync(historyPath, 'utf8'));
-      if (!Array.isArray(list)) list = [];
-    }
-    list.unshift(entry);
-    writeFileSync(historyPath, JSON.stringify(list.slice(0, 50), null, 2), 'utf8');
-  } catch {
-    // ignore non-critical local history write error
-  }
-}
-
-export function resolveNamespacedSubdomain(rawSub, project, isRaw = false) {
-  const cleanSub = normalizeSubdomain(rawSub);
-  if (!cleanSub) return project || 'prod';
-  if (isRaw || !project || project === 'default') return cleanSub;
-  if (cleanSub === 'prod' || cleanSub === project) return project;
-  if (cleanSub.startsWith(`${project}-`)) return cleanSub;
-  return `${project}-${cleanSub}`;
-}
-
-export function inferProjectFromRecord(item, fallback = 'default') {
-  if (item?.project) return item.project;
-  const sub = item?.subdomain || item?.immutableSubdomain || '';
-  if (sub && !sub.startsWith('dpl-') && sub.includes('-')) {
-    return sub.split('-')[0];
-  }
-  return fallback;
-}
-
-// ============================================================================
-// 1. 本地模式 CAS 引擎 (离线沙盒验证)
-// ============================================================================
-export function deployDirectory(
-  targetDir,
-  { storageDir = DEFAULT_STORAGE_DIR, aliases = [], project = 'default' } = {}
-) {
-  const absTarget = resolve(targetDir);
-  if (!existsSync(absTarget)) {
-    throw new Error(`目标构建目录不存在: ${absTarget}`);
-  }
-  ensureStorageDirs(storageDir);
-
-  const files = walkFiles(absTarget);
-  if (files.length === 0) {
-    throw new Error(`目标目录为空: ${absTarget}`);
-  }
-
-  let uploadedBlobs = 0;
-  let reusedBlobs = 0;
-  const manifestFiles = {};
-
-  for (const file of files) {
-    const content = readFileSync(file.fullPath);
-    const hash = sha256Hex(content);
-    const blobPath = resolve(storageDir, 'blobs', hash);
-
-    if (existsSync(blobPath)) {
-      reusedBlobs++;
-      console.log(`  ⚡ [CAS 命中跳过] ${file.relPath} (sha256: ${hash.slice(0, 10)}...)`);
-    } else {
-      writeFileSync(blobPath, content);
-      uploadedBlobs++;
-      console.log(`  ⬆️ [新块增量上传] ${file.relPath} -> blobs/${hash.slice(0, 10)}... (${file.size} B)`);
-    }
-
-    const ext = extname(file.relPath).toLowerCase();
-    manifestFiles[file.relPath] = {
-      sha256: hash,
-      size: file.size,
-      contentType: MIME_MAP[ext] || 'application/octet-stream',
-    };
-  }
-
-  const treeSignature = JSON.stringify({ project, files: manifestFiles, ts: Date.now() });
-  const shortHash = sha256Hex(Buffer.from(treeSignature)).slice(0, 8);
-  const deploymentId = `dpl_${shortHash}`;
-  const immutableSubdomain =
-    project && project !== 'default' ? `${project}-${shortHash}` : `dpl-${shortHash}`;
-
-  const manifest = {
-    id: deploymentId,
-    project,
-    immutableSubdomain,
-    createdAt: new Date().toISOString(),
-    stats: {
-      totalFiles: files.length,
-      uploadedBlobs,
-      reusedBlobs,
-    },
-    spaFallback: manifestFiles['/200.html']
-      ? '/200.html'
-      : manifestFiles['/index.html']
-      ? '/index.html'
-      : null,
-    files: manifestFiles,
-  };
-
-  const manifestPath = resolve(storageDir, 'manifests', `${deploymentId}.json`);
-  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
-
-  const boundUrls = [];
-  const allSubdomains = new Set([immutableSubdomain, ...aliases.map(normalizeSubdomain)]);
-  if (immutableSubdomain !== `dpl-${shortHash}`) {
-    setAlias(`dpl-${shortHash}`, deploymentId, { storageDir, silent: true, project });
-  }
-  for (const sub of allSubdomains) {
-    if (!sub) continue;
-    setAlias(sub, deploymentId, { storageDir, silent: true, project });
-    boundUrls.push(`http://${sub}.${BASE_DOMAIN}`);
-  }
-
-  console.log(`\n✅ 部署完成! [项目: ${project}] Deployment ID: ${deploymentId}`);
-  console.log(
-    `   文件统计: 共 ${files.length} 个文件 (新增上传 ${uploadedBlobs} 个, CAS 复用 ${reusedBlobs} 个)`
-  );
-  for (const u of boundUrls) {
-    console.log(`   🌐 访问地址: ${u}`);
-  }
-
-  return { deploymentId, immutableSubdomain, boundUrls, manifest };
-}
-
-export function setAlias(
-  subdomain,
-  deploymentId,
-  { storageDir = DEFAULT_STORAGE_DIR, silent = false, project = null } = {}
-) {
-  const cleanSub = normalizeSubdomain(subdomain);
-  ensureStorageDirs(storageDir);
-  const manifestPath = resolve(storageDir, 'manifests', `${deploymentId}.json`);
-  if (!existsSync(manifestPath)) {
-    throw new Error(`目标部署版本不存在: ${deploymentId}`);
-  }
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-  const effectiveProject = project || manifest.project || 'default';
-
-  const aliasData = {
-    subdomain: cleanSub,
-    project: effectiveProject,
-    deploymentId,
-    updatedAt: new Date().toISOString(),
-  };
-  const aliasPath = resolve(storageDir, 'aliases', `${cleanSub}.json`);
-  writeFileSync(aliasPath, JSON.stringify(aliasData, null, 2), 'utf8');
-
-  if (!silent) {
-    console.log(`🔗 域名别名已切换: http://${cleanSub}.${BASE_DOMAIN} -> ${deploymentId} (0 秒生效)`);
-  }
-  return aliasData;
-}
-
-export function listState({
-  storageDir = DEFAULT_STORAGE_DIR,
-  projectFilter = null,
-  showAll = false,
-} = {}) {
-  ensureStorageDirs(storageDir);
-  const blobs = readdirSync(resolve(storageDir, 'blobs'));
-  const allManifests = readdirSync(resolve(storageDir, 'manifests'))
-    .filter((f) => f.endsWith('.json'))
-    .map((f) => JSON.parse(readFileSync(resolve(storageDir, 'manifests', f), 'utf8')))
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-
-  const allAliases = readdirSync(resolve(storageDir, 'aliases'))
-    .filter((f) => f.endsWith('.json'))
-    .map((f) => JSON.parse(readFileSync(resolve(storageDir, 'aliases', f), 'utf8')))
-    .sort((a, b) => a.subdomain.localeCompare(b.subdomain));
-
-  printFormattedState({
-    modeLabel: '本地沙盒',
-    domainSuffix: BASE_DOMAIN,
-    protocol: 'http',
-    blobsCount: blobs.length,
-    allManifests,
-    allAliases,
-    projectFilter,
-    showAll,
-  });
-
-  return { blobsCount: blobs.length, manifests: allManifests, aliases: allAliases };
-}
-
-// ============================================================================
-// 2. 腾讯云 COS + EdgeOne 云端模式 (默认生产模式)
-// ============================================================================
-export async function deployRemoteDirectory(
-  targetDir,
-  { aliases = [], project = 'default', cwd = process.cwd() } = {}
-) {
-  const { remoteDomain } = assertCloudEndpointsConfigured();
-  const absTarget = resolve(targetDir);
-  if (!existsSync(absTarget)) {
-    throw new Error(`目标构建目录不存在: ${absTarget}`);
-  }
-
-  const files = walkFiles(absTarget);
-  if (files.length === 0) {
-    throw new Error(`目标目录为空: ${absTarget}`);
-  }
-
-  console.log(`☁️  正在向腾讯云 COS 执行 CAS 去重部署... [项目命名空间: ${project}]`);
-  console.log(`📂 目标目录: ${absTarget} (共 ${files.length} 个文件)`);
-
-  let uploadedBlobs = 0;
-  let reusedBlobs = 0;
-  const manifestFiles = {};
-
-  for (const file of files) {
-    const content = readFileSync(file.fullPath);
-    const hash = sha256Hex(content);
-    const blobKey = `blobs/${hash}`;
-    const ext = extname(file.relPath).toLowerCase();
-    const contentType = MIME_MAP[ext] || 'application/octet-stream';
-
-    const exists = await cosHeadObject(blobKey);
-    if (exists) {
-      reusedBlobs++;
-      console.log(`  ⚡ [COS CAS 命中跳过] ${file.relPath} (sha256: ${hash.slice(0, 10)}...)`);
-    } else {
-      await cosPutObject(blobKey, content, contentType);
-      uploadedBlobs++;
-      console.log(`  ⬆️ [COS 新块上传] ${file.relPath} -> ${blobKey.slice(0, 16)}... (${file.size} B)`);
-    }
-
-    manifestFiles[file.relPath] = {
-      sha256: hash,
-      size: file.size,
-      contentType,
-    };
-  }
-
-  const treeSignature = JSON.stringify({ project, files: manifestFiles, ts: Date.now() });
-  const shortHash = sha256Hex(Buffer.from(treeSignature)).slice(0, 8);
-  const deploymentId = `dpl_${shortHash}`;
-  const immutableSubdomain =
-    project && project !== 'default' ? `${project}-${shortHash}` : `dpl-${shortHash}`;
-
-  const manifest = {
-    id: deploymentId,
-    project,
-    immutableSubdomain,
-    createdAt: new Date().toISOString(),
-    stats: {
-      totalFiles: files.length,
-      uploadedBlobs,
-      reusedBlobs,
-    },
-    spaFallback: manifestFiles['/200.html']
-      ? '/200.html'
-      : manifestFiles['/index.html']
-      ? '/index.html'
-      : null,
-    files: manifestFiles,
-  };
-
-  await cosPutObject(
-    `manifests/${deploymentId}.json`,
-    JSON.stringify(manifest, null, 2),
-    'application/json; charset=UTF-8'
-  );
-
-  const boundUrls = [];
-  const allSubdomains = new Set([immutableSubdomain, ...aliases.map(normalizeSubdomain)]);
-  for (const sub of allSubdomains) {
-    if (!sub) continue;
-    await setRemoteAlias(sub, deploymentId, { silent: true, skipVerify: true, project });
-    boundUrls.push(`https://${sub}.${remoteDomain}`);
-  }
-
-  appendLocalProjectHistory(cwd, {
-    id: deploymentId,
-    project,
-    immutableSubdomain,
-    aliases: [...allSubdomains],
-    urls: boundUrls,
-    createdAt: manifest.createdAt,
-  });
-
-  console.log(`\n✅ 云端部署完成! [项目: ${project}] Deployment ID: ${deploymentId}`);
-  console.log(
-    `   文件统计: 共 ${files.length} 个文件 (COS 新增上传 ${uploadedBlobs} 个, CAS 复用 ${reusedBlobs} 个)`
-  );
-  for (const u of boundUrls) {
-    console.log(`   🌐 线上访问地址: ${u}`);
-  }
-
-  return { deploymentId, immutableSubdomain, boundUrls, manifest };
-}
-
-export async function setRemoteAlias(
-  subdomain,
-  deploymentId,
-  { silent = false, skipVerify = false, project = null } = {}
-) {
-  const { remoteDomain } = assertCloudEndpointsConfigured();
-  const cleanSub = normalizeSubdomain(subdomain);
-  let inferredProject = project;
-
-  if (!skipVerify) {
-    const manifest = await cosGetJson(`manifests/${deploymentId}.json`);
-    if (!manifest) {
-      throw new Error(`云端 COS 中不存在目标部署版本: ${deploymentId}`);
-    }
-    inferredProject = inferredProject || manifest.project || 'default';
-  }
-
-  const aliasData = {
-    subdomain: cleanSub,
-    project: inferredProject || inferProjectFromRecord({ subdomain: cleanSub }),
-    deploymentId,
-    updatedAt: new Date().toISOString(),
-  };
-
-  await cosPutObject(
-    `aliases/${cleanSub}.json`,
-    JSON.stringify(aliasData, null, 2),
-    'application/json; charset=UTF-8'
-  );
-
-  if (!silent) {
-    console.log(
-      `🔗 云端域名别名已切换: https://${cleanSub}.${remoteDomain} -> ${deploymentId} (全球边缘 0 秒生效)`
-    );
-  }
-  return aliasData;
-}
-
-export async function rollbackRemoteAlias(
-  subdomain,
-  targetDeploymentId = null,
-  { project = null } = {}
-) {
-  const { remoteDomain } = assertCloudEndpointsConfigured();
-  const cleanSub = normalizeSubdomain(subdomain);
-  const currentAlias = await cosGetJson(`aliases/${cleanSub}.json`);
-  if (!currentAlias) {
-    throw new Error(`未找到子域名 https://${cleanSub}.${remoteDomain} 的现有绑定记录`);
-  }
-
-  const currentDplId = currentAlias.deploymentId;
-  const effectiveProject = project || currentAlias.project || null;
-
-  if (targetDeploymentId) {
-    if (targetDeploymentId === currentDplId) {
-      console.log(`ℹ️  https://${cleanSub}.${remoteDomain} 当前已经指向 ${targetDeploymentId}`);
-      return currentAlias;
-    }
-    console.log(
-      `⏪ 正在将 https://${cleanSub}.${remoteDomain} 从 ${currentDplId} 回滚至指定版本 ${targetDeploymentId}...`
-    );
-    return setRemoteAlias(cleanSub, targetDeploymentId, { project: effectiveProject });
-  }
-
-  const manifestKeys = await cosListKeys('manifests/');
-  const manifests = (
-    await Promise.all(manifestKeys.filter((k) => k.endsWith('.json')).map((k) => cosGetJson(k)))
-  )
-    .filter(Boolean)
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-
-  const projectManifests = effectiveProject
-    ? manifests.filter((m) => inferProjectFromRecord(m) === effectiveProject)
-    : manifests;
-  const pool = projectManifests.length >= 2 ? projectManifests : manifests;
-
-  const currentIdx = pool.findIndex((m) => m.id === currentDplId);
-  const previousManifest =
-    currentIdx >= 0 && currentIdx + 1 < pool.length
-      ? pool[currentIdx + 1]
-      : pool.find((m) => m.id !== currentDplId);
-
-  if (!previousManifest) {
-    throw new Error(
-      `当前仅有 1 个部署版本 (${currentDplId})，没有更早的历史版本可供回滚。`
-    );
-  }
-
-  console.log(
-    `⏪ 正在将 https://${cleanSub}.${remoteDomain} 从 ${currentDplId} 回滚至上一版本 ${previousManifest.id} (${previousManifest.createdAt})...`
-  );
-  return setRemoteAlias(cleanSub, previousManifest.id, { project: effectiveProject });
-}
-
-function printFormattedState({
-  modeLabel,
-  domainSuffix,
-  protocol,
-  blobsCount,
-  allManifests,
-  allAliases,
-  projectFilter,
-  showAll,
-}) {
-  if (!showAll && projectFilter) {
-    const projManifests = allManifests.filter(
-      (m) => inferProjectFromRecord(m) === projectFilter
-    );
-    const projDplIds = new Set(projManifests.map((m) => m.id));
-    const projAliases = allAliases.filter(
-      (a) =>
-        a.project === projectFilter ||
-        a.subdomain === projectFilter ||
-        a.subdomain.startsWith(`${projectFilter}-`) ||
-        projDplIds.has(a.deploymentId)
-    );
-
-    console.log(
-      `=== 📦 当前项目命名空间: [${projectFilter}] (${modeLabel}全局 CAS 唯一块: ${blobsCount} 个) ===`
-    );
-    console.log(`\n=== 🚀 [${projectFilter}] 历史构建部署列表 (${projManifests.length} 个) ===`);
-    if (projManifests.length === 0) {
-      console.log(`  (当前项目 [${projectFilter}] 尚无部署记录，直接运行 \`myship\` 即可发布第一版)`);
-    } else {
-      for (const m of projManifests) {
-        console.log(
-          `  - ${m.id} (${m.immutableSubdomain}) | ${m.createdAt} | 文件:${m.stats.totalFiles} (新增:${m.stats.uploadedBlobs}, 复用:${m.stats.reusedBlobs})`
-        );
-      }
-    }
-
-    console.log(`\n=== 🌐 [${projectFilter}] 线上子域名路由映射表 (${projAliases.length} 个) ===`);
-    if (projAliases.length === 0) {
-      console.log(`  (当前项目 [${projectFilter}] 尚无子域名映射)`);
-    } else {
-      for (const a of projAliases) {
-        console.log(`  - ${protocol}://${a.subdomain}.${domainSuffix}  -->  ${a.deploymentId}`);
-      }
-    }
-    console.log(
-      `\n💡 提示: 默认仅展示当前项目 [${projectFilter}] 的记录；如需查看所有项目汇总，请执行 \`myship ls --all\`。`
-    );
-    return;
-  }
-
-  console.log(`=== ☁️  ${modeLabel} CAS 存储池 (全局唯一文件块: ${blobsCount} 个) ===`);
-  const projects = new Map();
-
-  function ensureBucket(proj) {
-    if (!projects.has(proj)) {
-      projects.set(proj, { manifests: [], aliases: [] });
-    }
-    return projects.get(proj);
-  }
-
-  const dplToProject = new Map();
-  for (const m of allManifests) {
-    const p = inferProjectFromRecord(m, 'default');
-    dplToProject.set(m.id, p);
-    ensureBucket(p).manifests.push(m);
-  }
-  for (const a of allAliases) {
-    const p = a.project || dplToProject.get(a.deploymentId) || inferProjectFromRecord(a, 'default');
-    ensureBucket(p).aliases.push(a);
-  }
-
-  const sortedProjectNames = [...projects.keys()].sort((a, b) => {
-    if (a === 'default') return 1;
-    if (b === 'default') return -1;
-    return a.localeCompare(b);
-  });
-
-  for (const proj of sortedProjectNames) {
-    const group = projects.get(proj);
-    const title = proj === 'default' ? '未分类 / 全局部署 (default)' : `项目命名空间: [${proj}]`;
-    console.log(`\n📦 ${title}`);
-    console.log(`  🚀 历史构建版本 (${group.manifests.length} 个):`);
-    for (const m of group.manifests) {
-      console.log(
-        `     - ${m.id} (${m.immutableSubdomain}) | ${m.createdAt} | 文件:${m.stats.totalFiles} (新增:${m.stats.uploadedBlobs}, 复用:${m.stats.reusedBlobs})`
-      );
-    }
-    console.log(`  🌐 绑定域名列表 (${group.aliases.length} 个):`);
-    for (const a of group.aliases) {
-      console.log(`     - ${protocol}://${a.subdomain}.${domainSuffix}  -->  ${a.deploymentId}`);
-    }
-  }
-}
-
-export async function listRemoteState({ projectFilter = null, showAll = false } = {}) {
-  const { remoteDomain } = assertCloudEndpointsConfigured();
-  const [blobKeys, manifestKeys, aliasKeys] = await Promise.all([
-    cosListKeys('blobs/'),
-    cosListKeys('manifests/'),
-    cosListKeys('aliases/'),
-  ]);
-
-  const allManifests = (
-    await Promise.all(manifestKeys.filter((k) => k.endsWith('.json')).map((k) => cosGetJson(k)))
-  )
-    .filter(Boolean)
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-
-  const allAliases = (
-    await Promise.all(aliasKeys.filter((k) => k.endsWith('.json')).map((k) => cosGetJson(k)))
-  )
-    .filter(Boolean)
-    .sort((a, b) => a.subdomain.localeCompare(b.subdomain));
-
-  printFormattedState({
-    modeLabel: '腾讯云 COS',
-    domainSuffix: remoteDomain,
-    protocol: 'https',
-    blobsCount: blobKeys.length,
-    allManifests,
-    allAliases,
-    projectFilter,
-    showAll,
-  });
-
-  return { blobsCount: blobKeys.length, manifests: allManifests, aliases: allAliases };
-}
-
-// ============================================================================
-// 3. 边缘函数代码生成器 (`myship build-edge-fn`) 与交互式登录 (`myship login`)
-// ============================================================================
-export function generateEdgeFunctionCode({ cosOrigin, outputPath, silent = false } = {}) {
-  const effective = getEffectiveEndpoints();
-  const targetCosOrigin = (cosOrigin || effective.cosOrigin || '').replace(/\/$/, '');
-  if (!targetCosOrigin) {
-    throw new Error(
-      '尚未配置 COS_ORIGIN！请先运行 `myship login` 或通过环境变量 COS_ORIGIN="https://myship-1250000000.cos.ap-guangzhou.myqcloud.com" 指定。'
-    );
-  }
-
-  const templatePath = resolve(__dirname, '../edge-gateway/edgeone-function.template.js');
-  const templateContent = readFileSync(templatePath, 'utf8');
-  const rendered = templateContent.replace(/__MYSHIP_COS_ORIGIN__/g, targetCosOrigin);
-
-  // 全局边缘函数属于用户云底座全局设施（1 个云函数服务全部项目），默认存放在 ~/.myship/edgeone-function.dist.js，绝不污染具体业务项目目录
-  const outFile = outputPath ? resolve(outputPath) : MYSHIP_GLOBAL_EDGE_FN_PATH;
-  mkdirSync(dirname(outFile), { recursive: true });
-  if (basename(dirname(outFile)) === '.myship' && dirname(outFile) !== dirname(MYSHIP_CONFIG_PATH)) {
-    ensureMyShipGitignore(dirname(outFile));
-  }
-  writeFileSync(outFile, rendered, 'utf8');
-
-  if (!silent) {
-    console.log(`✅ 已生成全局 EdgeOne 边缘函数代码 (全账号仅需 1 个函数，所有项目共享):`);
-    console.log(`   📄 全局路径: ${outFile}`);
-    console.log(`   ☁️  绑定 COS: ${targetCosOrigin}`);
-  }
-  return { outFile, targetCosOrigin, code: rendered };
-}
-
-async function promptAndDeployEdgeFunction({ cosOrigin, remoteDomain, rlExternal = null } = {}) {
-  const { outFile, code } = generateEdgeFunctionCode({ cosOrigin, silent: false });
-  const effective = getEffectiveEndpoints();
-  const domain = remoteDomain || effective.remoteDomain || 'ship.example.com';
-
-  const rl = rlExternal || createInterface({ input: process.stdin, output: process.stdout });
-  const ans = (
-    await rl.question(
-      `\n👉 是否现在直接将该全局边缘函数自动上传并部署到腾讯云 EdgeOne？[Y/n (直接回车立即上传)]: `
-    )
-  )
-    .trim()
-    .toLowerCase();
-  if (!rlExternal) {
-    rl.close();
-  }
-
-  if (!ans || ans === 'y' || ans === 'yes') {
-    try {
-      console.log('☁️  正在通过腾讯云 EdgeOne API 自动匹配站点并上传边缘函数...');
-      const res = await deployEdgeFunctionToTeo({ code, remoteDomain: domain });
-      console.log(
-        `🎉 全局边缘函数自动部署成功！[${res.actionTaken === 'created' ? '新建' : '更新'}] 站点: ${
-          res.zoneName
-        } (${res.zoneId}) -> 函数 ID: ${res.functionId}`
-      );
-      return res;
-    } catch (err) {
-      console.log(`\n⚠️  自动上传边缘函数未完成: ${err.message}`);
-      console.log(`   💡 提示：若你当前使用的是仅含 COS 最小权限的子账号密钥，可任选以下方式完成首次边缘函数部署：`);
-      console.log(`   • 方式 A (控制台粘贴 1 次即可)：复制 ${outFile} 内容粘贴至 EdgeOne 控制台【边缘函数】`);
-      console.log(`   • 方式 B (临时用 tccli 扫码权限上传)：运行 tccli auth login 后再次执行 myship setup-edge`);
-      return null;
-    }
-  } else {
-    console.log(`\n💡 你随时可以运行 \`myship setup-edge\` 自动上传，或手动将 ${outFile} 粘贴至 EdgeOne 控制台。`);
-    return null;
-  }
-}
 
 async function interactiveLogin() {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -936,10 +172,8 @@ async function interactiveLogin() {
   await cosListKeys('manifests/');
   console.log(`\n✅ COS 认证与连通性校验成功！全局配置已写入: ${MYSHIP_CONFIG_PATH}`);
 
-  // 自动生成全局备份至 ~/.myship/edgeone-function.dist.js（绝不写入当前业务项目目录）
   generateEdgeFunctionCode({ cosOrigin: patch.cosOrigin, silent: true });
 
-  // 自动探测云端全局 EdgeOne 泛域名网关是否已在线运行
   const probe = await probeEdgeGateway(patch.remoteDomain);
   if (probe.online) {
     rl.close();
@@ -981,40 +215,49 @@ function printWhoami() {
   console.log(`  📁 默认构建目录 (dir):  ${proj.buildDir}`);
   console.log(`  🌐 项目主域名:          https://${proj.prodDomain}.${suffix}`);
   console.log(`  🌐 构建指纹域名格式:    https://${proj.project}-<hash>.${suffix}`);
+  console.log(
+    `  🔌 全栈 SCF 后端开关:   ${
+      proj.backend?.enabled
+        ? `✅ 已开启 (${proj.backend.functionName} @ ${proj.backend.region})`
+        : '⚪ 未开启 (可执行 `myship backend enable` 按需开启)'
+    }`
+  );
   console.log(`  📄 配置来源:            ${proj.configSource}`);
 }
 
 function printHelp() {
   console.log(`
-🚀 MyShip CLI — 基于自有云设施 (BYOC) 的高 DX 部署与泛域名路由工具
+🚀 MyShip CLI — 基于自有云设施 (BYOC) 的高 DX 全栈部署与泛域名路由工具
 
 极简日常用法 (自动关联 .myship/project.json 项目命名空间):
-  myship                                       零参数部署：自动生成 <project>-<hash> 并更新 <project>.ship.<domain>
+  myship                                       零参数部署：自动发布前端与后端新版本并更新 <project>.ship.<domain>
   myship <目录> <环境后缀>                     项目内带后缀部署：如在 app1 下执行 myship ./dist v2 -> https://app1-v2.ship.<domain>
   myship -d <环境后缀> [-p <项目名>]           部署并自动拼接当前项目命名空间前缀 (加 --raw 可不加项目前缀)
 
+全栈业务后端 (腾讯云 SCF) 渐进式开关与日志:
+  myship backend enable [--entry server/index.mjs] 开启当前项目的腾讯云 SCF 全栈 Node.js 后端开关 (含权限与服务开通预检向导)
+  myship backend disable                       关闭当前项目的 SCF 全栈后端开关，切回纯静态托管模式
+  myship backend status                        查看当前项目的 SCF 后端开关状态与云端环境预检结果
+  myship logs [--error] [--limit 20]           查看当前项目 SCF 业务后端的实时运行日志与错误堆栈
+
 项目管理与切流回滚命令:
-  myship init [项目名]                         初始化或更新当前目录下的 .myship/project.json
+  myship init [项目名] [--scf] [--ci]          初始化 .myship/project.json (加 --scf 同步开启全栈后端，加 --ci 生成 GitHub Actions)
+  myship dev [目录] [--port 3000]              启动本地全栈即时开发服务器 (与云端 SCF 同源运行 Node 后端、公共模块与持久化存储)
+  myship console [--port 4200] [--local]       启动轻量单页 Web 可视化管控台 (本机 127.0.0.1 直连云端/沙盒，一键切流/回滚/Diff/环境变量/GC)
   myship ls [--all | -A]                       默认仅列出【当前项目】的历史构建与域名；加 --all 按项目分组列出全局所有记录
-  myship rollback [环境后缀] [目标dpl_id]      一键秒级回滚（不传参数默认回滚当前项目主域名 <project>.ship.<domain>）
-  myship alias <环境后缀> <dpl_id>             0 秒将指定子域名切换到目标版本
+  myship rollback [环境后缀] [目标dpl_id]      一键秒级回滚（前端静态快照与 SCF 后端版本同步回滚，保留持久化业务数据）
+  myship alias <环境后缀> <dpl_id>             0 秒将指定子域名切换到目标前后端版本
+  myship env <set|ls|rm|import|pull>           管理当前项目后端环境变量 (COS 私有存储 + 云函数注入)
+  myship rm <dpl_id...> [--force]              手动删除指定历史版本快照并自动回收独占块 (加 --alias 解绑域名，加 --project 彻底销毁整个项目)
+  myship gc [--keep <N|all>] [--older-than 7d] 清理过期历史快照 (支持按保留版本数或时间窗口如 30d/7d/24h)、回收孤儿块并释放配额
 
 跨设备认证与自有云底座初始化:
   myship login                                 交互式配置腾讯云密钥、COS 地址与泛域名后缀 (~/.myship/config.json)
   myship build-edge-fn [输出路径]              根据当前 COS 配置一键生成专属 EdgeOne 边缘函数代码 (.myship/edgeone-function.dist.js)
-  myship whoami                                查看当前生效的认证状态与项目命名空间配置
-
-可选参数:
-  -p, --project <name>                         显式指定本次操作的项目命名空间
-  --raw                                        自定义子域名不自动拼接 <project>- 前缀
-  --preview                                    仅生成本次构建快照域名 (<project>-<hash>)，不更新项目主域名
-  --local, -l                                  使用本地离线沙盒模式 (.cas-storage + ship.localhost:4100)
+  myship whoami                                查看当前生效的认证状态、项目命名空间与 SCF 后端开关配置
 `);
 }
 
-// ============================================================================
-// CLI 主入口解析
-// ============================================================================
 const isMainModule = (() => {
   if (!process.argv[1]) return false;
   try {
@@ -1030,17 +273,60 @@ if (isMainModule) {
   const isAll = rawArgs.includes('--all') || rawArgs.includes('-A');
   const isRawDomain = rawArgs.includes('--raw');
   const isPreviewOnly = rawArgs.includes('--preview');
+  const isDryRun = rawArgs.includes('--dry-run') || rawArgs.includes('-n');
+  const isReveal = rawArgs.includes('--reveal') || rawArgs.includes('--plain');
+  const isCi = rawArgs.includes('--ci');
+  const isSyncSecrets = rawArgs.includes('--sync-secrets');
+  const isForce = rawArgs.includes('--force') || rawArgs.includes('-f');
+  const isScfFlag = rawArgs.includes('--scf') || rawArgs.includes('--backend');
+  const isErrorsOnly = rawArgs.includes('--error') || rawArgs.includes('--errors');
 
   const domains = [];
+  const aliasTargets = [];
   let explicitProject = null;
+  let explicitDir = null;
+  let explicitEntry = null;
+  let explicitRegion = null;
+  let explicitRole = null;
+  let keepArg = null;
+  let olderThanArg = null;
+  let portArg = null;
+  let limitArg = null;
+  let rollbackTargetArg = null;
   const positional = [];
 
   for (let i = 0; i < rawArgs.length; i++) {
     const arg = rawArgs[i];
     if (arg === '--domain' || arg === '-d') {
       if (rawArgs[i + 1]) domains.push(rawArgs[++i]);
+    } else if (arg === '--alias' || arg === '-a') {
+      if (rawArgs[i + 1]) aliasTargets.push(rawArgs[++i]);
     } else if (arg === '--project' || arg === '-p') {
       if (rawArgs[i + 1]) explicitProject = rawArgs[++i];
+    } else if (arg === '--dir') {
+      if (rawArgs[i + 1]) explicitDir = rawArgs[++i];
+    } else if (arg === '--entry') {
+      if (rawArgs[i + 1]) explicitEntry = rawArgs[++i];
+    } else if (arg === '--region') {
+      if (rawArgs[i + 1]) explicitRegion = rawArgs[++i];
+    } else if (arg === '--role') {
+      if (rawArgs[i + 1]) explicitRole = rawArgs[++i];
+    } else if (arg === '--to' || arg === '--target' || arg === '-t') {
+      if (rawArgs[i + 1]) rollbackTargetArg = rawArgs[++i];
+    } else if (arg === '--limit' || arg === '-n') {
+      if (
+        rawArgs[0] === 'logs' ||
+        rawArgs[0] === 'log' ||
+        (arg === '--limit' && rawArgs[i + 1])
+      ) {
+        if (rawArgs[i + 1]) limitArg = rawArgs[++i];
+      }
+    } else if (arg === '--keep' || arg === '-k') {
+      if (rawArgs[i + 1]) keepArg = rawArgs[++i];
+    } else if (arg === '--older-than' || arg === '--before') {
+      if (rawArgs[i + 1]) olderThanArg = rawArgs[++i];
+    } else if (arg === '--port' || arg === '-P') {
+      if (rawArgs[i + 1]) portArg = rawArgs[++i];
     } else if (
       [
         '--local',
@@ -1051,8 +337,20 @@ if (isMainModule) {
         '-A',
         '--raw',
         '--preview',
+        '--dry-run',
+        '-n',
+        '--reveal',
+        '--plain',
+        '--ci',
+        '--sync-secrets',
+        '--force',
+        '-f',
         '--save',
         '-s',
+        '--scf',
+        '--backend',
+        '--error',
+        '--errors',
       ].includes(arg)
     ) {
       // flag handled
@@ -1097,9 +395,46 @@ if (isMainModule) {
       }
       return;
     }
-    if (first === 'init') {
+    if (first === 'backend' || first === 'scf' || first === 'enable' || first === 'disable') {
+      let sub = positional[1] || 'status';
+      if (first === 'enable') sub = 'enable';
+      if (first === 'disable') sub = 'disable';
+      await runBackendCommand({
+        subcommand: sub,
+        cwd: process.cwd(),
+        explicitProject,
+        region: explicitRegion,
+        entry: explicitEntry,
+        role: explicitRole,
+        isLocal,
+      });
+      return;
+    }
+    if (first === 'logs' || first === 'log') {
+      const limit = Number.parseInt(limitArg || '20', 10) || 20;
+      await fetchAndPrintScfLogs({
+        project: explicitProject,
+        cwd: process.cwd(),
+        region: explicitRegion,
+        limit,
+        errorsOnly: isErrorsOnly,
+        isLocal,
+      });
+      return;
+    }
+    if (first === 'init' || first === 'ci') {
+      if (isCi || first === 'ci') {
+        setupCiWorkflow(process.cwd(), {
+          project: positional[1] || explicitProject,
+          dir: explicitDir,
+          syncSecrets: isSyncSecrets,
+          overwrite: isForce,
+        });
+        return;
+      }
       const cfg = ensureProjectConfig(process.cwd(), {
         project: positional[1] || explicitProject,
+        dir: explicitDir,
       });
       const { remoteDomain } = getEffectiveEndpoints();
       const suffix = remoteDomain || 'ship.example.com';
@@ -1107,6 +442,17 @@ if (isMainModule) {
       console.log(`   🏷️  项目名称: ${cfg.project}`);
       console.log(`   📁 构建目录: ${cfg.dir}`);
       console.log(`   🌐 默认主域名: https://${cfg.prodDomain}.${suffix}`);
+      if (isScfFlag) {
+        await runBackendCommand({
+          subcommand: 'enable',
+          cwd: process.cwd(),
+          explicitProject: cfg.project,
+          region: explicitRegion,
+          entry: explicitEntry,
+          role: explicitRole,
+          isLocal,
+        });
+      }
       return;
     }
     if (first === 'ls' || first === 'list') {
@@ -1137,7 +483,7 @@ if (isMainModule) {
     if (first === 'rollback') {
       const ctx = detectProjectContext(process.cwd(), explicitProject);
       let rawSub = positional[1];
-      let targetDplId = positional[2] || null;
+      let targetDplId = positional[2] || rollbackTargetArg || null;
       if (rawSub && rawSub.startsWith('dpl_')) {
         targetDplId = rawSub;
         rawSub = null;
@@ -1145,7 +491,124 @@ if (isMainModule) {
       const finalSub = rawSub
         ? resolveNamespacedSubdomain(rawSub, ctx.project, isRawDomain)
         : ctx.prodDomain;
-      await rollbackRemoteAlias(finalSub, targetDplId, { project: ctx.project });
+      if (isLocal) {
+        rollbackAlias(finalSub, targetDplId, { project: ctx.project });
+      } else {
+        await rollbackRemoteAlias(finalSub, targetDplId, { project: ctx.project });
+      }
+      return;
+    }
+    if (first === 'console' || first === 'dashboard' || first === 'ui') {
+      const port = Number.parseInt(portArg || process.env.PORT || '4200', 10) || 4200;
+      await startConsoleServer({
+        port,
+        isLocal,
+        cwd: process.cwd(),
+      });
+      return;
+    }
+    if (first === 'gc' || first === 'prune') {
+      const parsedKeep =
+        keepArg === 'all' || (olderThanArg && keepArg === null)
+          ? Infinity
+          : keepArg !== null
+          ? Math.max(Number.parseInt(keepArg, 10) || 10, 1)
+          : 10;
+      const projectFilter = explicitProject ? normalizeDomainToken(explicitProject) : null;
+      if (isLocal) {
+        gcState({
+          keepCount: parsedKeep,
+          olderThan: olderThanArg,
+          projectFilter,
+          dryRun: isDryRun,
+        });
+      } else {
+        await gcRemoteState({
+          keepCount: parsedKeep,
+          olderThan: olderThanArg,
+          projectFilter,
+          dryRun: isDryRun,
+        });
+      }
+      return;
+    }
+    if (
+      first === 'rm' ||
+      first === 'remove' ||
+      first === 'del' ||
+      first === 'delete' ||
+      first === 'purge'
+    ) {
+      const restTargets = positional.slice(1);
+      if (first === 'purge' || (explicitProject && restTargets.length === 0 && aliasTargets.length === 0)) {
+        const targetProj = restTargets[0] || explicitProject;
+        if (!targetProj) {
+          throw new Error('用法: myship rm --project <项目名> [--dry-run]');
+        }
+        await removeResources({
+          purgeProject: targetProj,
+          dryRun: isDryRun,
+          isLocal,
+        });
+        return;
+      }
+      const ctx = detectProjectContext(process.cwd(), explicitProject);
+      if (aliasTargets.length > 0) {
+        await removeResources({
+          aliases: [...aliasTargets, ...restTargets],
+          project: explicitProject ? normalizeDomainToken(explicitProject) : ctx.project,
+          raw: isRawDomain,
+          dryRun: isDryRun,
+          isLocal,
+        });
+        return;
+      }
+      await removeResources({
+        deploymentIds: restTargets,
+        project: explicitProject ? normalizeDomainToken(explicitProject) : null,
+        force: isForce,
+        dryRun: isDryRun,
+        isLocal,
+      });
+      return;
+    }
+    if (first === 'env') {
+      const ctx = detectProjectContext(process.cwd(), explicitProject);
+      const targetProj = explicitProject ? normalizeDomainToken(explicitProject) : ctx.project;
+      const subcommand = positional[1] || 'ls';
+      const subArgs = positional.slice(2);
+      await runEnvCommand({
+        subcommand,
+        args: subArgs,
+        project: targetProj,
+        isLocal,
+        reveal: isReveal,
+        cwd: process.cwd(),
+      });
+      return;
+    }
+    if (first === 'dev') {
+      const ctx = detectProjectContext(process.cwd(), explicitProject);
+      const targetProj = explicitProject ? normalizeDomainToken(explicitProject) : ctx.project;
+      let staticDir = positional[1];
+      if (!staticDir) {
+        if (existsSync(resolve(process.cwd(), 'index.html'))) {
+          staticDir = '.';
+        } else if (existsSync(resolve(process.cwd(), 'public/index.html'))) {
+          staticDir = './public';
+        } else if (ctx.buildDir && existsSync(resolve(process.cwd(), ctx.buildDir))) {
+          staticDir = ctx.buildDir;
+        } else {
+          staticDir = '.';
+        }
+      }
+      const port = Number.parseInt(portArg || process.env.PORT || '3000', 10) || 3000;
+      await startDevServer({
+        staticDir,
+        cwd: process.cwd(),
+        project: targetProj,
+        port,
+      });
       return;
     }
 
@@ -1160,7 +623,28 @@ if (isMainModule) {
     }
 
     const ctx = detectProjectContext(process.cwd(), explicitProject);
-    const finalDir = targetDir || ctx.buildDir;
+    let finalDir = targetDir || ctx.buildDir;
+    const pkgJsonPath = resolve(process.cwd(), 'package.json');
+    if (!targetDir && existsSync(pkgJsonPath)) {
+      try {
+        const pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf8'));
+        if (pkg?.scripts?.build && (!existsSync(resolve(finalDir)) || ctx.backend?.enabled)) {
+          console.log(`🔨 检测到前端构建脚本 (npm run build)，正在自动构建前端产物...`);
+          const buildRes = spawnSync('npm', ['run', 'build'], {
+            cwd: process.cwd(),
+            stdio: 'inherit',
+            shell: process.platform === 'win32',
+          });
+          if (buildRes.status !== 0) {
+            throw new Error(`前端构建失败 (npm run build 退出码: ${buildRes.status})，已终止发布。`);
+          }
+          const refreshedCtx = detectProjectContext(process.cwd(), explicitProject);
+          finalDir = refreshedCtx.buildDir;
+        }
+      } catch (err) {
+        if (err.message.includes('前端构建失败')) throw err;
+      }
+    }
     if (!finalDir || !existsSync(resolve(finalDir))) {
       console.error(
         `❌ 未找到构建产物目录 (${finalDir || './dist'})。请先执行构建 (如 npm run build) 或指定目录: myship ./dist`

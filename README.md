@@ -29,6 +29,7 @@
 | **自定义子域名自由度** | 仅限固定的生产/预览环境域名 | **任意单次构建可绑定任意数量子域名**（`*.ship.example.com` 自动享免费泛域名 HTTPS） |
 | **多项目命名空间隔离** | 多个前端项目混杂或需频繁建新站点 | **内置 `.myship/project.json` 命名空间**（自动隔离 `app1-*` 与 `app2-*`，`myship ls` 默认按当前项目过滤） |
 | **线上切流与回滚耗时** | 需重新触发流水线或复制目录（数十秒至数分钟） | **0 毫秒原子切流/回滚**（仅改写 80 字节 `aliases/<subdomain>.json` 指针） |
+| **全栈 Serverless 函数 (`api/*.js`)** | 需单独配置网关或前后端分离部署，回滚易出现接口版本错位 | **约定式 `api/*.js` 自动路由 + CAS 寻址**，前后端共享同一 `dpl_<id>` 快照，0 秒同帧回滚 |
 | **客户端安装负担** | 需安装重型 SDK 或特定框架插件 | **0 外部 npm 依赖**，纯原生 Node.js 实现，任意电脑 1 秒全局安装 |
 
 ---
@@ -87,6 +88,10 @@ myship setup-edge
 
 ```bash
 cd /path/to/your-vue-or-react-app
+
+# 本地即时调试静态目录、api/*.js 云函数与 .env 环境变量（免执行 --local CAS 快照打包）
+myship dev
+
 npm run build
 
 # 直接输入 6 个字母！自动初始化 .myship/project.json 并发布至：
@@ -100,9 +105,75 @@ myship -d v2
 # 查看当前项目命名空间下的历史版本与线上域名（加 --all 查看全量项目分组）
 myship ls
 
-# 0 秒将当前项目主域名一键回退到上一个历史版本
+# 0 秒将当前项目主域名一键回退到上一个历史版本（前端页面与 /api/* 云函数同帧原子回退！）
 myship rollback
+
+# 清理过期历史快照 (支持按保留版本数 --keep 或按时间窗口 --older-than 30d)、回收孤儿静态块并释放路由配额
+myship gc --dry-run
+myship gc --older-than 7d
+
+# 手动删除指定构建快照、解绑子域名或彻底销毁废弃项目 (自动通过引用计数回收独占块，绝不误伤共享资源)
+myship rm dpl_xxxx
+myship rm --alias pr-1
+myship rm --project old-demo
+
+# 一键生成 GitHub Actions 自动部署与 PR 预览机器人工作流 (.github/workflows/myship.yml) 并同步仓库 Secrets
+myship init --ci --sync-secrets
+
+# 启动轻量单页 Web 可视化管控台 (本机 127.0.0.1:4200 直连云端，鼠标一键切流/回滚/双版本 Diff/环境变量/GC)
+myship console
 ```
+
+### 第 5 步：（Phase 2 全栈能力）零配置编写 `api/*.js` 边缘 Serverless 云函数
+
+在你的项目目录下新建 `api/hello.js`，下次执行 `myship` 时会自动将其私有归档至 `functions/<sha256>.json`、打包进当前构建版本的 `dpl_<id>` 快照，并同步至腾讯云 EdgeOne 上的**独立统一 API 边缘函数**（与全局纯静态路由 `myship-cas-router` 100% 物理隔离；内部通过 `host -> subdomain -> manifest -> functions[route].sha256` 精确寻址，多项目同名路由互不串线；同时支持 Web 标准 `GET(request, context)` 与 EdgeOne 官方 `onRequestGet(context)` 签名）：
+
+```javascript
+// api/hello.js -> 自动映射为 https://app1.ship.example.com/api/hello
+export async function GET(request, context) {
+  return {
+    ok: true,
+    message: `Hello from ${context.subdomain} (${context.deploymentId})!`,
+    hasApiKey: Boolean(context.env.API_KEY), // 或直接读取 process.env.API_KEY
+    clientIp: context.clientIp, // 自动透传 EdgeOne 客户端真实 IP
+    geo: context.geo,           // 自动透传 EdgeOne 国家/省份/城市/运营商地理信息
+  };
+}
+```
+
+通过 `myship env` 管理项目专属环境变量（云端私有存储于 `envs/<project>.json`，修改后自动热更新边缘 API 函数，无需重传静态文件）：
+
+```bash
+myship env set API_KEY=sk-123456 DB_URL=postgres://...
+myship env ls              # 默认脱敏展示 (加 --reveal 查看明文)
+myship env import .env     # 批量导入标准 .env 文件
+myship env rm DB_URL       # 移除指定变量并热更新
+```
+
+### 第 6 步：（按需开启）腾讯云 SCF 全栈 Node.js 业务后端与持久化存储
+
+当你的应用需要完整的 Node.js 24/20 运行时、第三方 npm 依赖（或 **Hono** 等 Web 标准路由框架）、SSE 流式输出及独立持久化数据访问时，可通过渐进式能力开关一键开启 SCF Web 函数后端：
+
+```bash
+# 1. 开启当前项目的 SCF 全栈后端开关（自动执行权限预检与生成 server/index.mjs 入口骨架）
+myship backend enable
+
+# 2. 本地前后端同源联调（支持修改公共模块秒级热重载，本地数据持久化在 .myship/data/<project>/）
+myship dev
+
+# 3. 一键全栈发布（先构建并校验 SCF 不可变新版本与专属触发器，通过健康检查后再切换线上入口）
+myship
+
+# 4. 实时查询云端后端运行日志与 SourceMap 还原后的精确源码报错行号
+myship logs
+myship logs --error
+```
+
+**全栈后端契约与工程约定**：
+- **标准入口与框架**：默认入口为 `server/index.{mjs,js,ts}`，统一遵循现代 ESM + Web Standard `fetch(request, context)` 契约（原生支持 `export async function fetch` 或 **Hono** 的 `export default app`）。
+- **打包与静态资源约定**：底层使用 `esbuild` 标准打包并开启 `sourcemap: 'inline'` + `node --enable-source-maps`，自动还原真实源码堆栈行号；后端静态模板文件请统一放置在 `server/` 目录（如 `server/templates/prompt.txt`），通过相对于 `server/index.mjs` 的 `new URL('./templates/prompt.txt', import.meta.url)` 读取（被打包合并的外部共享子模块如 `lib/*.mjs` 内部请勿假设保留独立的 `import.meta.url` 目录基准）。
+- **独立持久化存储 (`context.storage`)**：内置 `await context.storage.get(key)` / `set(key, val)`（云端私有存储于 COS `data/<project>/<key>.json`，`ACL: private`），应用代码执行 `myship rollback` 回滚时仅切换代码版本，**绝不清空或回滚业务持久化数据**。需要使用长期 AK/SK 凭证、显式配置 `MYSHIP_DATA_SECRET_ID` / `MYSHIP_DATA_SECRET_KEY` 或配置 `backend.role` 运行角色（拒绝将短期过期的临时会话 Token 固化进云函数）。
+- **不可变版本隔离与保留规则**：每个部署版本绑定独立的 SCF 不可变版本（`Version 1`, `Version 2`），新旧预览域名各自访问对应版本后端；每个项目云端保留 **当前活跃别名（含回滚版本）+ 最近最多 5 个历史预览版本（总计上限 8 个版本）**，超出窗口的旧预览版本自动联动回收其 SCF 触发器、版本与历史 `manifest`。
 
 ---
 
@@ -119,10 +190,11 @@ myship/
 ├── packages/
 │   ├── cli/                       # @myship/cli — 零依赖 CLI 客户端
 │   │   ├── myship.mjs             # CLI 主程序 (init / login / build-edge-fn / deploy / alias / rollback / ls)
-│   │   └── cos-client.mjs         # 原生 node:crypto 腾讯云 COS XML v5 签名客户端
+│   │   └── cos-client.mjs         # 原生 node:crypto 腾讯云 COS XML v5 与 EdgeOne TEO API 客户端
 │   │
 │   └── edge-gateway/              # @myship/edge-gateway — 边缘路由网关
-│       ├── edgeone-function.template.js # EdgeOne 边缘函数标准模板
+│       ├── edgeone-function.template.js   # 纯净版全局静态 CAS 路由模板 (myship-cas-router)
+│       ├── edgeone-api-worker.template.js # 独立统一 API 边缘函数模板 (多项目 SHA-256 路由隔离, 方案 A+C)
 │       └── local-gateway.mjs      # 本地 4100 端口泛域名模拟网关 (*.ship.localhost:4100)
 │
 ├── apps/

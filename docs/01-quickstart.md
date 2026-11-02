@@ -15,6 +15,7 @@
 | **0 秒原子切流/回滚** | 毫秒级切换任意子域名指向的构建版本 | ✅ | ✅ | 仅修改 80 字节 `aliases/<subdomain>.json` 指针，无需重新构建或复制文件 |
 | **项目隔离与全局视图** | `myship ls` 与 `myship ls --all` | ✅ | ✅ | 默认仅显示当前项目的构建与域名；加 `--all` 按项目分组展示全局总览 |
 | **SPA History 路由** | 自动回退 `/200.html` 或 `/index.html` | ✅ | ✅ | 原生支持 Vue Router / React Router 的 `createWebHistory()` 模式 |
+| **约定式 Serverless 云函数** | `api/**/*.js` 零配置自动路由与 CAS 寻址 | ✅ | ✅ | 自动识别 `api/*.js` 映射为 `/api/*` 接口，与前端共享同一 `dpl_<id>` 快照，支持前后端 0 秒同帧回滚 |
 | **零依赖跨机认证** | 三级凭证自动兜底 + 边缘函数生成 | — | ✅ | 支持环境变量、`~/.myship/config.json` 与 `~/.tccli/default.credential` 自动复用 |
 
 ---
@@ -125,11 +126,137 @@ myship rollback v2
 myship alias v2 dpl_6e46ed99
 ```
 
+### 5. CAS 垃圾回收与 API 路由配额释放 (`myship gc`)
+
+```bash
+# 预览模式：查看可清理的过期历史快照、无引用孤儿静态块与废弃云函数（不执行删除）
+myship gc --dry-run
+
+# 执行清理（默认每个项目保留最近 10 个历史版本 + 所有正在绑定的线上版本，并自动释放废弃 API 路由配额）
+myship gc
+
+# 自定义保留版本数（如每个项目保留最近 5 个版本，或 --keep all 仅清理无引用孤儿块）
+myship gc --keep 5
+```
+
+### 6. GitHub Actions 自动部署与 PR 预览工作流 (`myship init --ci`)
+
+```bash
+# 一键生成 .github/workflows/myship.yml（Push main 自动发生产主域，提 PR 自动发 https://<project>-pr-<号>.<domain> 并回复评论）
+myship init --ci
+
+# 若本机已安装并登录 GitHub CLI (gh)，可加 --sync-secrets 一键将云端密钥自动写入当前 GitHub 仓库 Secrets
+myship init --ci --sync-secrets
+```
+
 ---
 
-## 四、免云账号本地离线沙盒模式 (`--local`)
+## 四、约定式 Serverless 云函数 (`api/*.js`) 与全栈原子回滚
 
-如果你在没有网络的环境下开发，或者想在不配置云账号的情况下体验完整功能，只需加上 `--local`（或直接运行仓库自带的演示脚本）：
+无需手写任何网关配置文件，只需在你的项目根目录（或构建产物目录）下创建 `api/` 文件夹并编写标准的 JavaScript 模块，`myship` 在部署时会自动执行**前后端职责解耦的双层 Serverless 架构**：
+- **方案 A（默认主力 · 独立统一 API 边缘函数）**：自动在腾讯云 EdgeOne 上维护与全局纯静态路由器（`myship-cas-router`）100% 物理隔离的独立 API 边缘函数并绑定高优触发规则；内部按 `host -> subdomain -> manifest -> functions[route].sha256` 寻址，多项目同名路由互不串线，并与前端页面绑定同一 `dpl_<id>` 快照实现 0 秒同帧回滚。
+- **方案 C（远期重算力扩展槽 · 腾讯云 SCF 函数 URL 反向代理）**：当某个接口需要超过 5MB 的重型 `node_modules`、原生 TCP 数据库连接池或 900 秒长耗时 AI 推理时，只需在 `api/<route>.js` 中导出 `export const upstreamUrl = 'https://<id>.ap-guangzhou.tencentscf.com'`，边缘网关将自动执行零跨域反向代理并注入 `X-MyShip-Deployment-Id` 上下文头。
+
+### 1. 编写你的第一个云函数 (`api/hello.js`)
+
+同时兼容 **Web / Vercel 标准导出 (`GET` / `POST` / `default`)** 与 **腾讯云 EdgeOne 官方导出 (`onRequest` / `onRequestGet` / `onRequestPost`)**，可直接返回普通 JSON 对象或 `Response` 实例，并自动注入 EdgeOne 原生的客户端 IP 与地理位置信息 (`context.geo` / `context.clientIp`)：
+
+```javascript
+// 写法 A：Web / Next.js 风格命名导出 (api/hello.js -> https://<子域名>/api/hello)
+export async function GET(request, context) {
+  const name = context.query.name || 'MyShip Developer';
+
+  return {
+    ok: true,
+    message: `Hello, ${name}! Executed at Edge V8 Isolate.`,
+    project: context.project,
+    deploymentId: context.deploymentId, // 与当前前端页面严格同源的构建版本 ID
+    subdomain: context.subdomain,
+    functionSha256: context.functionSha256,
+    clientIp: context.clientIp,         // 自动透传 EdgeOne request.eo.clientIp
+    geo: context.geo,                   // 自动透传 EdgeOne 国家/省份/城市/运营商信息
+    timestamp: new Date().toISOString(),
+  };
+}
+
+// 写法 B：腾讯云 EdgeOne 官方 onRequest* 签名（同样原生支持）
+export async function onRequestPost(context) {
+  const body = await context.request.json();
+  return {
+    ok: true,
+    received: body,
+    deploymentId: context.deploymentId,
+  };
+}
+
+// 写法 C（可选重算力扩展槽）：一行代码将当前路由反向代理至腾讯云 SCF 函数 URL
+// export const upstreamUrl = 'https://xxx-1250000000.ap-guangzhou.tencentscf.com';
+```
+
+### 2. 项目级云函数环境变量管理 (`myship env`)
+
+每个项目的环境变量按项目命名空间独立保存在 COS 私有路径 `envs/<project>.json`（`x-cos-acl: private`），并在边缘函数中同时注入 `context.env` 与 `process.env`（支持模块顶层或请求处理函数内读取，多项目互不串线）：
+
+```bash
+# 设置一个或多个环境变量（若已部署 API 云函数，3~5 秒内自动热更新生效，无需重传静态文件）
+myship env set OPENAI_API_KEY=sk-xxxx WEBHOOK_SECRET=whsec_123
+
+# 从本地 .env 文件批量导入
+myship env import .env
+
+# 查看当前项目环境变量（默认掩码脱敏，加 --reveal 查看明文）
+myship env ls
+myship env ls --reveal
+
+# 导出当前项目云端环境变量到本地 .env.local (权限 0600)
+myship env pull
+
+# 删除指定环境变量
+myship env rm WEBHOOK_SECRET
+```
+
+### 3. 前后端同一毫秒原子切流与回滚
+
+当你修改了前端页面和 `api/hello.js` 并执行 `myship -d v2` 时：
+- 访问 `https://app1.ship.example.com/api/hello` 依然执行 **V1 版本**的云函数代码；
+- 访问 `https://app1-v2.ship.example.com/api/hello` 立即执行 **V2 版本**的云函数代码；
+- 当执行 `myship rollback` 时，主域名的前端 HTML 与 `/api/*` 后端接口**在同一毫秒内同步回退到旧版本**，彻底杜绝前后端发版时间差导致的接口报错！
+
+### 3. 腾讯云 EdgeOne V8 运行时规范与内置防超限护栏
+
+由于云端网关运行在腾讯云 **EdgeOne 全球边缘节点 V8 Isolate 沙盒**中，`MyShip` 已针对 EdgeOne 官方配额与 Runtime API 规范内置了静态检查与运行时水位线保护：
+
+| 规范维度 | 腾讯云 EdgeOne 官方限制 | MyShip 内置护栏与兼容策略 |
+| :--- | :--- | :--- |
+| **运行环境** | 纯 V8 Isolate（非 Node.js），不支持 `fs` / `path` / `net` / `child_process` | CLI 部署期静态扫描拦截 Node.js 原生内置模块，提示改用 `fetch` / `crypto.subtle` |
+| **函数签名兼容** | 官方支持 `onRequest(context)` / `onRequestGet(context)`，且扩展了 `request.eo` | **双向全兼容**：同时支持标准 `GET(request, context)` 与 EdgeOne `onRequestGet(context)`，自动注入 `context.geo` 与 `context.clientIp` |
+| **API 差异垫片** | 原生 V8 未提供 `Response.json()`、`process.env`，禁止 `new Headers()` 复杂构造与 `eval` | 网关自动注入 `Response.json` 与 `process.env` 兼容垫片，使用纯对象 Headers 与 100% 预编译 AST（零 `eval`/`new Function`） |
+| **运行内存上限** | 单实例最大 **128 MB** | 边缘内存缓存采用 `Uint8Array` 零拷贝视图，并设 **8 MB 总容量上限 + 256 KB 单文件上限**，严防 OOM |
+| **代码包体积上限** | 单函数代码包最大 **5 MB** | 单 `api/*.js` 限制 `512 KB`，全局预编译池设 **3.5 MB 自动水位线淘汰**（优先保留最新活跃版本） |
+| **请求体与执行配额** | 客户端请求 Body 最大 **1 MB**；单次 CPU 时间 **200 ms**；子请求 `fetch` 最多 **64 次（并发 8）** | 网关自动拦截 `>1MB` 请求并返回标准 `413 Payload Too Large` JSON 提示 |
+
+---
+
+## 五、本地全栈即时开发 (`myship dev`) 与离线沙盒 (`--local`)
+
+### 1. 本地全栈即时开发服务器 (`myship dev`)
+
+日常编写静态页面与 `api/*.js` 云函数时，无需每次修改都生成 `.cas-storage` 本地快照，直接运行 `myship dev` 即可启动零依赖本地开发服务器（注：`myship dev` 直接服务静态文件与 `api/*.js`，不内置 Vue/React/TS 前端构建编译器；若项目包含根目录 `index.html` 会优先挂载当前目录 `.`，也可显式传入已生成的构建目录）：
+
+```bash
+# 默认在 http://localhost:3000 启动（自动实时加载静态目录、api/*.js 与 .env / .env.local）
+myship dev
+
+# 指定静态目录与自定义端口
+myship dev ./public --port 8080
+```
+
+- **保存即生效**：每次请求实时读取最新 `api/*.js` 与 `.env`，并内置 EdgeOne V8 规范实时校验（若误用 Node.js `fs` 或语法错误，直接返回 500 JSON 诊断详情而不中断开发服务）。
+- **安全防泄漏**：自动拦截对 `/.env`、`/.git`、`/.myship`、`/api/*.js` 源码及 `..` 目录穿越的访问。
+
+### 2. 免云账号本地离线 CAS 沙盒模式 (`--local`)
+
+如果你在没有网络的环境下开发，或者想在不配置云账号的情况下体验完整 CAS 多版本切流与回滚，只需加上 `--local`（或直接运行仓库自带的演示脚本）：
 
 ```bash
 # 一键运行离线 V1/V2 发布、CAS 去重与 0 秒回滚验证

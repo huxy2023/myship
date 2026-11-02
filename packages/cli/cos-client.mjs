@@ -181,7 +181,15 @@ export function signCosRequest(method, objectKey, customOrigin) {
   const keyTime = `${now - 60};${now + 3600}`;
   const signKey = hmacSha1Hex(secretKey, keyTime);
 
-  const httpString = `${method.toLowerCase()}\n${url.pathname}\n\nhost=${encodeURIComponent(host).toLowerCase()}\n`;
+  const paramEntries = [];
+  for (const [k, v] of url.searchParams.entries()) {
+    paramEntries.push([encodeURIComponent(k).toLowerCase(), encodeURIComponent(v)]);
+  }
+  paramEntries.sort((a, b) => a[0].localeCompare(b[0]));
+  const urlParamList = paramEntries.map(([k]) => k).join(';');
+  const httpParameters = paramEntries.map(([k, v]) => `${k}=${v}`).join('&');
+
+  const httpString = `${method.toLowerCase()}\n${url.pathname}\n${httpParameters}\nhost=${encodeURIComponent(host).toLowerCase()}\n`;
   const stringToSign = `sha1\n${keyTime}\n${sha1Hex(httpString)}\n`;
   const signature = hmacSha1Hex(signKey, stringToSign);
 
@@ -191,7 +199,7 @@ export function signCosRequest(method, objectKey, customOrigin) {
     `q-sign-time=${keyTime}`,
     `q-key-time=${keyTime}`,
     'q-header-list=host',
-    'q-url-param-list=',
+    `q-url-param-list=${urlParamList}`,
     `q-signature=${signature}`,
   ].join('&');
 
@@ -207,18 +215,25 @@ export function signCosRequest(method, objectKey, customOrigin) {
 export async function cosHeadObject(objectKey, customOrigin) {
   const { url, headers } = signCosRequest('HEAD', objectKey, customOrigin);
   const res = await fetch(url, { method: 'HEAD', headers });
-  return res.status === 200;
+  if (res.status === 404) {
+    return false;
+  }
+  if (!res.ok) {
+    throw new Error(`COS HEAD 检查失败 (${res.status}) [${objectKey}]`);
+  }
+  return true;
 }
 
 export async function cosPutObject(
   objectKey,
   body,
   contentType = 'application/octet-stream',
-  customOrigin
+  customOrigin,
+  options = {}
 ) {
   const { url, headers } = signCosRequest('PUT', objectKey, customOrigin);
   headers['Content-Type'] = contentType;
-  headers['x-cos-acl'] = 'public-read';
+  headers['x-cos-acl'] = options.acl || 'public-read';
 
   const res = await fetch(url, {
     method: 'PUT',
@@ -233,6 +248,16 @@ export async function cosPutObject(
   return true;
 }
 
+export async function cosDeleteObject(objectKey, customOrigin) {
+  const { url, headers } = signCosRequest('DELETE', objectKey, customOrigin);
+  const res = await fetch(url, { method: 'DELETE', headers });
+  if (!res.ok && res.status !== 404 && res.status !== 204) {
+    const errText = await res.text();
+    throw new Error(`COS DELETE 失败 (${res.status}) [${objectKey}]: ${errText.slice(0, 300)}`);
+  }
+  return true;
+}
+
 export async function cosGetJson(objectKey, customOrigin) {
   const { url, headers } = signCosRequest('GET', objectKey, customOrigin);
   const res = await fetch(url, { method: 'GET', headers });
@@ -242,21 +267,46 @@ export async function cosGetJson(objectKey, customOrigin) {
   return res.json();
 }
 
-export async function cosListKeys(prefix = '', customOrigin) {
-  const { url, headers } = signCosRequest('GET', '/', customOrigin);
-  const res = await fetch(url, { method: 'GET', headers });
-  if (!res.ok) {
-    throw new Error(`COS ListBucket 失败 (${res.status})`);
-  }
-  const xml = await res.text();
+export async function cosListKeys(prefix = '', customOrigin, { maxKeys = 1000 } = {}) {
   const keys = [];
-  const regex = /<Key>([^<]+)<\/Key>/g;
-  let match;
-  while ((match = regex.exec(xml)) !== null) {
-    if (!prefix || match[1].startsWith(prefix)) {
-      keys.push(match[1]);
+  let marker = '';
+
+  while (true) {
+    const qs = new URLSearchParams();
+    if (prefix) qs.set('prefix', prefix);
+    if (maxKeys) qs.set('max-keys', String(maxKeys));
+    if (marker) qs.set('marker', marker);
+
+    const queryStr = qs.toString();
+    const reqPath = queryStr ? `/?${queryStr}` : '/';
+    const { url, headers } = signCosRequest('GET', reqPath, customOrigin);
+    const res = await fetch(url, { method: 'GET', headers });
+    if (!res.ok) {
+      throw new Error(`COS ListBucket 失败 (${res.status})`);
     }
+    const xml = await res.text();
+    const regex = /<Key>([^<]+)<\/Key>/g;
+    let match;
+    let lastKeyInPage = '';
+    while ((match = regex.exec(xml)) !== null) {
+      lastKeyInPage = match[1];
+      if (!prefix || match[1].startsWith(prefix)) {
+        keys.push(match[1]);
+      }
+    }
+
+    const isTruncated = /<IsTruncated>\s*true\s*<\/IsTruncated>/i.test(xml);
+    if (!isTruncated) {
+      break;
+    }
+    const nextMarkerMatch = xml.match(/<NextMarker>([^<]+)<\/NextMarker>/i);
+    const nextMarker = nextMarkerMatch ? nextMarkerMatch[1] : lastKeyInPage;
+    if (!nextMarker || nextMarker === marker) {
+      break;
+    }
+    marker = nextMarker;
   }
+
   return keys;
 }
 
@@ -388,10 +438,13 @@ export async function deployEdgeFunctionToTeo({ code, remoteDomain }) {
   const zoneId = matchedZone.ZoneId;
   const zoneName = matchedZone.ZoneName;
 
-  // 2. 查询该站点下是否已有 myship-cas-router 边缘函数
+  // 2. 查询该站点下是否已有 myship-cas-router 边缘函数 (严格按前缀匹配，避免误改项目级 myship-api-* 函数)
   const fnResp = await teoRequest('DescribeFunctions', { ZoneId: zoneId });
   const functions = fnResp.Functions || [];
-  let targetFn = functions.find((f) => f.Name === 'myship-cas-router') || functions[0] || null;
+  let targetFn =
+    functions.find(
+      (f) => f.Name === 'myship-cas-router' || (f.Name && f.Name.startsWith('myship-cas-router-'))
+    ) || null;
   let functionId = null;
   let actionTaken = '';
 
@@ -401,7 +454,7 @@ export async function deployEdgeFunctionToTeo({ code, remoteDomain }) {
       ZoneId: zoneId,
       FunctionId: functionId,
       Content: code,
-      Remark: 'MyShip Global CAS Wildcard Router (Managed by @myship/cli)',
+      Remark: 'MyShip Pure Static CAS Router (Managed by @myship/cli)',
     });
     actionTaken = 'updated';
   } else {
@@ -409,7 +462,7 @@ export async function deployEdgeFunctionToTeo({ code, remoteDomain }) {
       ZoneId: zoneId,
       Name: 'myship-cas-router',
       Content: code,
-      Remark: 'MyShip Global CAS Wildcard Router (Managed by @myship/cli)',
+      Remark: 'MyShip Pure Static CAS Router (Managed by @myship/cli)',
     });
     functionId = createResp.FunctionId;
     actionTaken = 'created';
@@ -419,14 +472,14 @@ export async function deployEdgeFunctionToTeo({ code, remoteDomain }) {
       await teoRequest('CreateFunctionRule', {
         ZoneId: zoneId,
         FunctionId: functionId,
-        Remark: `MyShip wildcard route for *.${cleanDomain}`,
+        Remark: `MyShip wildcard route for *.${cleanDomain}`.slice(0, 58),
         FunctionRuleConditions: [
           {
             RuleConditions: [
               {
-                Operator: 'equal',
+                Operator: 'notequal',
                 Target: 'host',
-                Values: [`*.${cleanDomain}`, cleanDomain],
+                Values: [zoneName],
               },
             ],
           },
@@ -439,4 +492,254 @@ export async function deployEdgeFunctionToTeo({ code, remoteDomain }) {
 
   saveMyShipFileConfig({ zoneId, functionId });
   return { zoneId, zoneName, functionId, actionTaken };
+}
+
+/**
+ * 方案 A：为包含 `api/*.js` 的项目创建/更新独立的 EdgeOne 边缘函数 (`myship-api-<project>`)
+ * 并自动配置高优先级 `/api/*` 触发规则，实现与全局静态路由器 `myship-cas-router` 的 100% 职责分离。
+ */
+export async function deployProjectApiFunctionToTeo({
+  project = 'default',
+  code,
+  hosts = [],
+  routes = [],
+  remoteDomain,
+  replaceRoutes = false,
+}) {
+  const cleanDomain = (remoteDomain || '').replace(/^\*\./, '');
+  const parts = cleanDomain.split('.');
+  const rootDomainGuess = parts.length >= 2 ? parts.slice(-2).join('.') : cleanDomain;
+
+  const cleanProj =
+    String(project || 'default')
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '') || 'default';
+  // EdgeOne 函数名限制 2~30 字符
+  const desiredFnName = `myship-api-${cleanProj}`.slice(0, 28).replace(/-$/, '');
+
+  // 1. 查找站点 ZoneId
+  const zonesResp = await teoRequest('DescribeZones', {});
+  const zones = zonesResp.Zones || [];
+  if (zones.length === 0) {
+    throw new Error('当前腾讯云账号下未找到任何 EdgeOne 站点 (Zone)。');
+  }
+  const matchedZone =
+    zones.find((z) => z.ZoneName === rootDomainGuess || cleanDomain.endsWith(z.ZoneName)) ||
+    zones[0];
+  const zoneId = matchedZone.ZoneId;
+  const zoneName = matchedZone.ZoneName;
+
+  // 2. 查询统一 API 边缘函数与现有触发规则 (在修改云端函数或规则前先校验路由配额上限，杜绝静默截断)
+  const [fnResp, rulesResp] = await Promise.all([
+    teoRequest('DescribeFunctions', { ZoneId: zoneId }),
+    teoRequest('DescribeFunctionRules', { ZoneId: zoneId }),
+  ]);
+  const functions = fnResp.Functions || [];
+  const allRules = rulesResp.FunctionRules || [];
+
+  const targetFn =
+    functions.find(
+      (f) =>
+        f.Name === desiredFnName ||
+        (f.Name && f.Name.startsWith(`${desiredFnName}-`)) ||
+        f.Name === 'myship-api-router' ||
+        (f.Name && f.Name.startsWith('myship-api-'))
+    ) || null;
+
+  const existingRule = targetFn
+    ? allRules.find((r) => r.FunctionId === targetFn.FunctionId)
+    : null;
+
+  const existingProjectRoutes = [];
+  let hasHostNotEqualZone = false;
+  if (existingRule && Array.isArray(existingRule.FunctionRuleConditions)) {
+    for (const group of existingRule.FunctionRuleConditions) {
+      for (const cond of group.RuleConditions || []) {
+        if (
+          cond.Target === 'host' &&
+          cond.Operator === 'notequal' &&
+          Array.isArray(cond.Values) &&
+          cond.Values.includes(zoneName)
+        ) {
+          hasHostNotEqualZone = true;
+        }
+        if (cond.Target === 'url' && cond.Operator === 'equal' && Array.isArray(cond.Values)) {
+          for (const u of cond.Values) {
+            if (u && !u.includes('*')) existingProjectRoutes.push(u);
+          }
+        }
+      }
+    }
+  }
+
+  const fnRemark = `MyShip Dedicated API Worker (Scheme A+C, Multi-Project CAS)`.slice(0, 58);
+
+  // 当 replaceRoutes=true 且活跃 API 路由归零时（如 myship gc 清理了全部 API 版本），撤销 API 触发规则并清空函数池
+  if (replaceRoutes && routes.length === 0) {
+    if (!targetFn) {
+      return {
+        zoneId,
+        zoneName,
+        functionId: null,
+        functionName: desiredFnName,
+        ruleId: null,
+        routes: [],
+        actionTaken: 'noop',
+      };
+    }
+    const functionId = targetFn.FunctionId;
+    const functionName = targetFn.Name || desiredFnName;
+    await teoRequest('ModifyFunction', {
+      ZoneId: zoneId,
+      FunctionId: functionId,
+      Content: code,
+      Remark: fnRemark,
+    });
+    if (existingRule && existingRule.RuleId) {
+      await teoRequest('DeleteFunctionRules', {
+        ZoneId: zoneId,
+        RuleIds: [existingRule.RuleId],
+      });
+    }
+    return {
+      zoneId,
+      zoneName,
+      functionId,
+      functionName,
+      ruleId: null,
+      routes: [],
+      actionTaken: 'cleared',
+    };
+  }
+
+  const MAX_API_RULE_VALUES = 30;
+  const routeInputs = replaceRoutes
+    ? routes.length > 0
+      ? routes
+      : ['/api']
+    : [...(routes.length > 0 ? routes : ['/api']), ...existingProjectRoutes];
+  const normalizedRoutes = Array.from(
+    new Set(
+      routeInputs.flatMap((r) => {
+        const clean = r.startsWith('/') ? r : `/${r}`;
+        return clean.length > 1 && !clean.endsWith('/') ? [clean, `${clean}/`] : [clean];
+      })
+    )
+  );
+
+  if (normalizedRoutes.length > MAX_API_RULE_VALUES) {
+    throw new Error(
+      `API 路由数量超出单条 EdgeOne 触发规则上限: 当前累计需匹配 ${normalizedRoutes.length} 项 URL 条件 (上限 ${MAX_API_RULE_VALUES} 项，约 ${Math.floor(
+        MAX_API_RULE_VALUES / 2
+      )} 个不同 API 路径)。已终止发布，未修改云端函数与域名。`
+    );
+  }
+
+  let functionId = null;
+  let functionName = desiredFnName;
+  let actionTaken = '';
+
+  if (targetFn) {
+    functionId = targetFn.FunctionId;
+    functionName = targetFn.Name || desiredFnName;
+    await teoRequest('ModifyFunction', {
+      ZoneId: zoneId,
+      FunctionId: functionId,
+      Content: code,
+      Remark: fnRemark,
+    });
+    actionTaken = 'updated';
+  } else {
+    const createResp = await teoRequest('CreateFunction', {
+      ZoneId: zoneId,
+      Name: desiredFnName,
+      Content: code,
+      Remark: fnRemark,
+    });
+    functionId = createResp.FunctionId;
+    actionTaken = 'created';
+  }
+
+  // 3. 自动创建或按需增量更新 /api/* 边缘函数触发规则
+  const existingRouteSet = new Set(existingProjectRoutes);
+  const allRoutesAlreadyCovered =
+    existingRule &&
+    hasHostNotEqualZone &&
+    normalizedRoutes.every((r) => existingRouteSet.has(r)) &&
+    (!replaceRoutes || existingRouteSet.size === normalizedRoutes.length);
+
+  const ruleConditionsPayload = [
+    {
+      RuleConditions: [
+        {
+          Operator: 'notequal',
+          Target: 'host',
+          Values: [zoneName],
+        },
+        {
+          Operator: 'equal',
+          Target: 'url',
+          Values: normalizedRoutes,
+        },
+      ],
+    },
+  ];
+  const ruleRemark = `MyShip API routes for *.${cleanDomain}`.slice(0, 58);
+
+  let ruleId = null;
+  if (existingRule) {
+    ruleId = existingRule.RuleId;
+    if (!allRoutesAlreadyCovered) {
+      await teoRequest('ModifyFunctionRule', {
+        ZoneId: zoneId,
+        RuleId: ruleId,
+        FunctionId: functionId,
+        TriggerType: 'direct',
+        Remark: ruleRemark,
+        FunctionRuleConditions: ruleConditionsPayload,
+      });
+    }
+  } else {
+    const createRuleResp = await teoRequest('CreateFunctionRule', {
+      ZoneId: zoneId,
+      FunctionId: functionId,
+      TriggerType: 'direct',
+      Remark: ruleRemark,
+      FunctionRuleConditions: ruleConditionsPayload,
+    });
+    ruleId = createRuleResp.RuleId;
+  }
+
+  // 确保 API 规则排在全局静态 CAS 规则之前 (EdgeOne RuleIds 数组从上到下依次执行，索引 0 优先级最高)
+  const latestRules = existingRule && allRoutesAlreadyCovered
+    ? allRules
+    : (await teoRequest('DescribeFunctionRules', { ZoneId: zoneId })).FunctionRules || [];
+  if (latestRules.length >= 2) {
+    const casFn = functions.find(
+      (f) => f.Name === 'myship-cas-router' || (f.Name && f.Name.startsWith('myship-cas-router-'))
+    );
+    const casFnId = casFn ? casFn.FunctionId : null;
+    const apiRuleIds = latestRules.filter((r) => r.FunctionId !== casFnId).map((r) => r.RuleId);
+    const casRuleIds = latestRules.filter((r) => r.FunctionId === casFnId).map((r) => r.RuleId);
+    const desiredOrder = [...apiRuleIds, ...casRuleIds];
+    const currentOrder = latestRules.map((r) => r.RuleId);
+    if (JSON.stringify(desiredOrder) !== JSON.stringify(currentOrder)) {
+      await teoRequest('ModifyFunctionRulePriority', {
+        ZoneId: zoneId,
+        RuleIds: desiredOrder,
+      });
+    }
+  }
+
+  return {
+    zoneId,
+    zoneName,
+    functionId,
+    functionName,
+    ruleId,
+    routes: normalizedRoutes,
+    actionTaken,
+  };
 }

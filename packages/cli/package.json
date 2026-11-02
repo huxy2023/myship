@@ -8,10 +8,10 @@
     "myship": "./myship.mjs"
   },
   "files": [
-    "myship.mjs",
-    "cos-client.mjs"
+    "*.mjs"
   ],
   "scripts": {
+    "test": "node --test test/*.test.mjs",
     "start": "node myship.mjs",
     "ls": "node myship.mjs ls"
   },

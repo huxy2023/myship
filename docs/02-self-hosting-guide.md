@@ -29,8 +29,8 @@ flowchart TB
 
     subgraph COS["4. 腾讯云 COS 对象存储 (myship-1250000000)"]
         COS_Aliases["/aliases/<subdomain>.json<br/>(子域名 -> dpl_id 动态路由指针)"]
-        COS_Manifests["/manifests/dpl_<id>.json<br/>(单次构建文件树与 SHA-256 映射表)"]
-        COS_Blobs["/blobs/<sha256><br/>(全局去重不可变文件内容池)"]
+        COS_Manifests["/manifests/dpl_<id>.json<br/>(全栈构建清单: files + functions)"]
+        COS_Blobs["/blobs/<sha256> & /functions/<sha256>.json<br/>(全局去重静态块与云函数版本池)"]
     end
 
     User["公网浏览器访问<br/>https://app1.ship.example.com"] -- "1. DNS 解析" --> DNS_Wild
@@ -120,19 +120,31 @@ myship login
 - **根因**：如果你此前在腾讯云 **EdgeOne Pages** 项目中添加过同名自定义域名，它会被绑定在隐藏的 `default-pages-zone` 下，导致标准站点无法重复添加同一域名。
 - **解决法案**：先前往 EdgeOne Pages 控制台删除该自定义域名，等待约 1 分钟状态释放后，即可在标准站点顺利添加。
 
-### 坑点 3：如何通过 HTTP 响应头快速排查当前子域名命中了哪个构建版本？
-线上边缘函数会自动在每个响应中注入 4 个 `X-MyShip-*` 诊断头，随时可用 `curl -I` 巡检：
+### 坑点 3：如何通过 HTTP 响应头快速排查当前子域名命中了哪个构建版本与缓存层级？
+线上边缘网关（`EdgeOne-CAS-Gateway/2.0-FullStack`）会自动在每个响应中注入 `X-MyShip-*` 诊断头，随时可用 `curl -I` 巡检静态文件或 `/api/*` 云函数状态：
 
 ```bash
+# 巡检静态页面命中版本与边缘内存缓存状态
 curl -I https://app1.ship.example.com/
+
+# 巡检 Serverless 云函数命中版本与预编译 V8 状态
+curl -i https://app1.ship.example.com/api/hello
 ```
 
 响应头示例：
 ```http
 HTTP/2 200
-content-type: text/html; charset=UTF-8
-x-myship-engine: EdgeOne-CAS-Gateway/1.0
+content-type: application/json; charset=UTF-8
+x-myship-engine: EdgeOne-CAS-Gateway/2.0-FullStack
 x-myship-subdomain: app1
-x-myship-deployment-id: dpl_6e46ed99
-x-myship-blob-sha256: 5adc23fa1d2194f0...
+x-myship-deployment-id: dpl_816ac41e
+x-myship-function-route: /api/hello
+x-myship-function-sha256: 7c577e8776903db1627c09d9e8e068156634b659...
+x-myship-function-mode: PRECOMPILED-V8
 ```
+
+### 坑点 4：为什么手写 EdgeOne 边缘函数有时会报 `HTTP 545 Error return from script`？（MyShip 已内置全套防崩护栏）
+腾讯云 EdgeOne 边缘函数运行在高度精简的 **V8 Isolate 沙盒**中，若不了解其底层边界极易触发 `545` 脚本异常。`MyShip` 已在 CLI 与网关层为你内置了自动化防护：
+1. **`URLSearchParams` 迭代器与 `Response.json()` 差异**：EdgeOne V8 中直接调用 `Object.fromEntries(url.searchParams)` 或 `Response.json()` 会抛出 `TypeError`。`MyShip` 网关已内置零依赖 Query 解析器（直接读取 `context.query`）与 `Response.json` / `process.env` 兼容垫片。
+2. **严禁使用 `new Headers()` 复杂构造与 Node.js 内置模块**：网关内部统一使用 Plain Object 合并响应头；同时 `myship` CLI 在部署时会自动静态扫描 `api/*.js`，一旦发现误引 `fs` / `path` / `http` 等 Node.js 模块会立即在本地拦截提示。
+3. **`128 MB` 内存红线与 `5 MB` 代码包红线**：网关对边缘内存缓存实施严格的 **`8 MB` 字节级总量控制 + `Uint8Array` 零拷贝视图**；CLI 对预编译函数池实施 **`3.5 MB` 自动水位线保护**，从根源上杜绝 OOM 与代码包超限。

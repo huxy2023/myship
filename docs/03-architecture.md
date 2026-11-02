@@ -12,15 +12,18 @@
 - **存储膨胀快**：假设你的前端项目包含 5MB 的公共 JS/字体/图片，哪怕每次只改了 1 行文案，发布 100 次就会占用 500MB 存储。因此平台不得不强制清理早期版本。
 - **切流与回滚慢**：回滚时需要重新复制文件或重新触发构建流水线，存在明显的生效延迟与中间态风险。
 
-### 2. MyShip 的三级解耦寻址流程
+### 2. MyShip 的三级解耦寻址流程（前后端边缘函数 100% 职责分离）
 
 ```mermaid
 flowchart LR
-    Req["浏览器请求<br/>https://app1-v2.ship.example.com/index.html"] --> Edge["EdgeOne 边缘函数网关<br/>(myship-cas-router)"]
-    Edge -- "1. 提取 Host 子域名 (app1-v2)<br/>实时读取 (no-cache)" --> Alias["COS: aliases/app1-v2.json<br/>{ deploymentId: 'dpl_4f788e9d' }"]
-    Alias -- "2. 定位不可变版本清单" --> Manifest["COS: manifests/dpl_4f788e9d.json<br/>{ '/index.html': { sha256: '5adc23...' } }"]
-    Manifest -- "3. 按内容哈希寻址" --> Blob["COS: blobs/5adc23fa1d...<br/>(真实文件内容块)"]
-    Blob -- "4. 注入 Content-Type 与诊断头返回" --> Req
+    Req["浏览器请求<br/>https://app1-v2.ship.example.com/*"] --> EO["腾讯云 EdgeOne 触发规则引擎"]
+    EO -- "Rule 1 (高优): /api/*" --> ApiWorker["独立统一 API 边缘函数<br/>(多项目 SHA-256 路由隔离)"]
+    EO -- "Rule 2 (兜底): 静态路径" --> CasRouter["纯净全局静态 CAS 路由器<br/>(myship-cas-router)"]
+    ApiWorker & CasRouter -- "1. 解析子域名指针 (SWR)" --> Alias["COS: aliases/app1-v2.json<br/>{ deploymentId: 'dpl_4f788e9d' }"]
+    Alias -- "2. 定位全栈快照清单" --> Manifest["COS: manifests/dpl_4f788e9d.json<br/>{ files: {...}, functions: {...} }"]
+    Manifest -- "3a. 方案 A: 边缘 V8 (0ms)" --> V8Fn["SHA-256 预编译函数池<br/>PRECOMPILED_FN_REGISTRY[sha256]"]
+    Manifest -- "3b. 方案 C: 重算力代理" --> ScfUrl["腾讯云 SCF 函数 URL<br/>(fnEntry.upstreamUrl)"]
+    Manifest -- "3c. 命中静态文件块" --> Blob["边缘 BLOB_CACHE (8MB) /<br/>COS: blobs/<sha256>"]
 ```
 
 ---
@@ -36,15 +39,22 @@ flowchart LR
   - **若返回 `404`**：仅上传真正发生变化的增量文件块。
 - 无论你手头有 10 个项目还是发布了 1,000 个版本，相同的公共依赖库、图标、字体在 COS 里永远只有 1 份。
 
-### 2. `manifests/dpl_<id>.json`（构建快照清单 · 永久不可变）
-- 记录某一次构建所属的项目命名空间（`project`）、文件树路径，以及每个路径对应的 `sha256`、`size` 和 `contentType`：
+### 2. `manifests/dpl_<id>.json`（全栈构建快照清单 · 永久不可变）
+- 记录某一次构建所属的项目命名空间（`project`）、前端静态文件树（`files`）与后端 Serverless 云函数路由表（`functions`），以及每个路径对应的 `sha256` 内容哈希：
   ```json
   {
     "id": "dpl_4f788e9d",
     "project": "app1",
     "immutableSubdomain": "app1-4f788e9d",
     "createdAt": "2026-10-29T05:36:31.465Z",
-    "stats": { "totalFiles": 12, "uploadedBlobs": 1, "reusedBlobs": 11 },
+    "stats": {
+      "totalFiles": 12,
+      "uploadedBlobs": 1,
+      "reusedBlobs": 11,
+      "totalFunctions": 1,
+      "uploadedFunctions": 1,
+      "reusedFunctions": 0
+    },
     "spaFallback": "/index.html",
     "files": {
       "/assets/vendor.js": {
@@ -57,10 +67,19 @@ flowchart LR
         "size": 2194,
         "contentType": "text/html; charset=UTF-8"
       }
+    },
+    "functions": {
+      "/api/hello": {
+        "sha256": "36908c5530bc8c08...",
+        "entryFile": "api/hello.js",
+        "runtime": "edge-js",
+        "size": 412
+      }
     }
   }
   ```
 - **为什么能保留无限个历史版本？** 因为每个构建快照清单只是一个约 `1KB` 的 JSON 文件！保留 10,000 个历史构建清单仅占约 `10MB` 空间，成本几乎为零。
+- **为什么前后端能做到 0 秒同帧回滚？** 因为 `functions` 的代码同样以 `sha256` 唯一索引预置在边缘 V8 引擎与 `blobs/<sha256>` 池中。子域名指针切换时，前端静态页面与后端 `/api/*` 云函数通过同一份 `manifest` 自动锁定对应版本的 `sha256`，绝不串版本！
 
 ### 3. `aliases/<subdomain>.json`（动态域名路由指针表 · 极小可变）
 - 每个子域名对应一个仅约 `80 字节` 的轻量指针文件：
@@ -84,6 +103,10 @@ flowchart LR
 1. 若请求路径精确命中 `manifest.files[reqPath]`（如 `/assets/app.js`），直接返回对应文件块；
 2. 若未命中且请求路径不含文件扩展名（如 `/users/profile`），边缘网关会自动回退读取构建产物中的 `/200.html` 或 `/index.html`，让前端路由无缝接管，绝不会出现刷新页面报 `404` 的问题。
 
-### 2. 智能分级缓存头 (`Cache-Control`)
-- **HTML 入口文件 (`text/html`)**：自动注入 `Cache-Control: no-cache, no-store, must-revalidate`，确保每次执行 `myship rollback` 或发布新版后，用户刷新浏览器立刻看到最新页面。
-- **静态资源文件 (JS / CSS / 图片 / 字体)**：自动注入 `Cache-Control: public, max-age=3600`（本地网关为 `immutable`），充分利用边缘节点与浏览器缓存加速加载。
+### 2. 智能分级缓存头 (`Cache-Control`)、V8 内存加速与流式分片 (`Range 206`)
+- **三级 V8 Isolate 内存缓存**：
+  - `MANIFEST_CACHE`：由于 `manifests/dpl_<id>.json` 永久不可变，首次读取后常驻边缘节点 V8 内存（0ms 命中）。
+  - `BLOB_CACHE`：对 `<= 256 KB` 的高频静态文件（如 `index.html`、图标、核心脚本）采用 `Uint8Array` 零拷贝视图驻留内存，并严格受 **`8 MB` 总字节账本**保护（远低于 EdgeOne `128 MB` 内存红线）。
+  - `ALIAS_CACHE`（SWR 异步刷新）：子域名指针在内存中提供毫秒级响应，同时利用 `event.waitUntil()` 在后台异步刷新。
+- **ETag 条件请求 (`304 Not Modified`)**：天然复用文件的 `SHA-256` 哈希作为强 `ETag`，浏览器二次刷新时在边缘直接返回 `304`，0 字节回源。
+- **大文件与 `<video>` 流式分片 (`HTTP 206 Partial Content`)**：自动向 COS 透传 `Range` 请求头并返回 `206 Partial Content` 与 `Content-Range`，实现高清长视频进度条任意拖拽秒开。

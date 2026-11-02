@@ -1,8 +1,14 @@
 node_modules/
 dist/
 apps/site/dist/
+apps/video/
+.idea/
+docs/private-*.md
+docs/research-*.md
 .myship/history.json
 .myship/*.dist.js
+.myship/*research*.md
+apps/**/.myship/
 **/.cas-storage/
 **/.demo-dist/
 .DS_Store

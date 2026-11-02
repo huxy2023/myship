@@ -358,10 +358,13 @@ ${parsedDocs.map((d) => `- [${d.title}](https://myship.ship.onehub.top${d.rawPat
 - 全局安装: \`npm i -g @myship/cli\`
 - 交互式登录与绑定自有云底座 (含 CAM 最小权限指引 / tccli 扫码 + 自动探测网关): \`myship login\`
 - 一键生成并自动上传全局 EdgeOne 边缘函数代码 (~/.myship/edgeone-function.dist.js): \`myship setup-edge\`
+- 本地全栈即时开发服务器 (免打包实时加载静态页、api/*.js 与 .env): \`myship dev\`
 - 零参数智能发布 (自动识别 .myship/project.json): \`myship\`
 - 发布指定子环境: \`myship -d v2\` 或 \`myship ./dist v2\`
+- 管理项目云函数环境变量 (COS 私有存储 + 边缘热更新): \`myship env <set|ls|rm|import|pull>\`
 - 查看当前项目版本与域名: \`myship ls\` (全局按项目分组: \`myship ls --all\`)
 - 0 秒一键回滚主域名: \`myship rollback\`
+- CAS 垃圾回收与 API 路由配额释放: \`myship gc\` (预览: \`myship gc --dry-run\`)
 `;
   writeFileSync(resolve(DIST_DIR, 'llms.txt'), llmsTxt, 'utf-8');
 
@@ -386,9 +389,119 @@ ${parsedDocs.map((d) => `- [${d.title}](https://myship.ship.onehub.top${d.rawPat
   const indexHtml = generateSiteHtml(parsedDocs, allSearchEntries, mcpConfig);
   writeFileSync(resolve(DIST_DIR, 'index.html'), indexHtml, 'utf-8');
 
+  // 生成 Phase 2 约定式 Serverless 云函数 (api/hello.js 与 api/status.js)
+  const apiDir = resolve(DIST_DIR, 'api');
+  mkdirSync(apiDir, { recursive: true });
+  const apiHelloSource = `/**
+ * api/hello.js — MyShip Phase 2 约定式边缘 Serverless 云函数在线示例
+ * 自动映射路由: GET / POST https://<subdomain>/api/hello
+ */
+export async function GET(request, context) {
+  const url = new URL(request.url);
+  const name = url.searchParams.get('name') || 'MyShip Pioneer';
+
+  return {
+    ok: true,
+    phase: 'Phase 2 · Convention-Based Serverless Functions (api/*.js)',
+    message: \`⚡ Hello, \${name}! Executed at Edge V8 Isolate with 0ms atomic version binding.\`,
+    runtime: 'EdgeOne-CAS-Gateway/2.0 (V8 Isolate)',
+    project: context.project,
+    subdomain: context.subdomain,
+    deploymentId: context.deploymentId,
+    route: context.route,
+    functionSha256: context.functionSha256,
+    clientIp: context.clientIp || undefined,
+    geo: context.geo && Object.keys(context.geo).length > 0 ? context.geo : undefined,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+export async function POST(request, context) {
+  let body = {};
+  try {
+    body = await request.json();
+  } catch {}
+  return {
+    ok: true,
+    method: 'POST',
+    received: body,
+    deploymentId: context.deploymentId,
+    functionSha256: context.functionSha256,
+    timestamp: new Date().toISOString(),
+  };
+}
+`;
+  writeFileSync(resolve(apiDir, 'hello.js'), apiHelloSource, 'utf-8');
+
+  const apiInspectSource = `/**
+ * api/inspect.js — MyShip Phase 2 边缘环境探针与 Web Crypto 签名实测函数
+ * 采用腾讯云 EdgeOne 官方推荐的 onRequestGet(context) / onRequestPost(context) 签名
+ * 自动映射路由: GET / POST https://<subdomain>/api/inspect
+ */
+export async function onRequestGet(context) {
+  const { request, query, clientIp, geo, deploymentId, subdomain, project, route, functionSha256 } = context;
+  const payloadText = \`\${project}:\${subdomain}:\${deploymentId}:\${clientIp}:\${ query.seed || 'edgeone-v8' }\`;
+
+  // 使用 EdgeOne V8 原生支持的 Web Crypto API (crypto.subtle) 计算 SHA-256 边缘签名
+  const encoded = new TextEncoder().encode(payloadText);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', encoded);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  const edgeSignature = hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+
+  return Response.json({
+    ok: true,
+    functionName: 'api/inspect.js',
+    signatureStyle: 'EdgeOne Official onRequestGet(context)',
+    route,
+    deployment: {
+      project,
+      subdomain,
+      deploymentId,
+      functionSha256,
+    },
+    edgeWebCrypto: {
+      algorithm: 'SHA-256 (crypto.subtle.digest)',
+      inputSeed: payloadText,
+      digestHex: edgeSignature,
+    },
+    v8Capabilities: {
+      webCryptoSubtle: typeof crypto !== 'undefined' && typeof crypto.subtle !== 'undefined',
+      responseJsonShim: typeof Response.json === 'function',
+      cachesApi: typeof caches !== 'undefined',
+      textEncoder: typeof TextEncoder !== 'undefined',
+    },
+    clientNetwork: {
+      clientIp: clientIp || 'unknown',
+      userAgent: request.headers.get('user-agent') || '',
+      acceptLanguage: request.headers.get('accept-language') || '',
+      geo: geo && Object.keys(geo).length > 0 ? geo : undefined,
+    },
+    timestamp: new Date().toISOString(),
+  });
+}
+
+export async function onRequestPost(context) {
+  let body = {};
+  try {
+    body = await context.request.json();
+  } catch {}
+  return Response.json({
+    ok: true,
+    functionName: 'api/inspect.js',
+    signatureStyle: 'EdgeOne Official onRequestPost(context)',
+    receivedBody: body,
+    deploymentId: context.deploymentId,
+    functionSha256: context.functionSha256,
+    timestamp: new Date().toISOString(),
+  });
+}
+`;
+  writeFileSync(resolve(apiDir, 'inspect.js'), apiInspectSource, 'utf-8');
+
   console.log(`✅ MyShip 开源版门户与 Clarify 风格文档站构建完成！输出目录: ${DIST_DIR}`);
   console.log(`   - 页面文档数: ${parsedDocs.length} 篇 (${parsedDocs.map((d) => d.shortTitle).join(' / ')})`);
   console.log(`   - AI 原始文档: ${parsedDocs.map((d) => d.rawPath).join(', ')}`);
+  console.log(`   - 边缘云函数:  /api/hello (api/hello.js), /api/inspect (api/inspect.js)`);
   console.log(`   - LLM 索引:    /llms.txt, /llms-full.txt, /mcp.json`);
 }
 
@@ -967,8 +1080,9 @@ function generateSiteHtml(parsedDocs, searchEntries, mcpConfig) {
             </div>
             <div class="terminal-tabs">
               <button type="button" class="term-tab active" data-term-tab="deploy">1. 零参数发布</button>
-              <button type="button" class="term-tab" data-term-tab="namespace">2. 项目命名空间</button>
-              <button type="button" class="term-tab" data-term-tab="rollback">3. 0秒原子回滚</button>
+              <button type="button" class="term-tab" data-term-tab="serverless">2. 全栈云函数</button>
+              <button type="button" class="term-tab" data-term-tab="namespace">3. 命名空间</button>
+              <button type="button" class="term-tab" data-term-tab="rollback">4. 0秒原子回滚</button>
             </div>
           </div>
           <div class="terminal-body" id="terminal-screen"></div>
@@ -994,6 +1108,48 @@ function generateSiteHtml(parsedDocs, searchEntries, mcpConfig) {
           <div class="stat-val">0 依赖</div>
           <div class="stat-label">纯 Node.js 原生实现，100% 掌控在自己的云账号下</div>
         </div>
+      </div>
+
+      <div class="section-head" style="margin-top: 12px;">
+        <h2>⚡ 在线实测：Phase 2 约定式边缘 Serverless 云函数 (<code>api/*.js</code>)</h2>
+        <p>本门户站已内置 2 个云函数（Web 标准签名的 <code>api/hello.js</code> 与 EdgeOne 官方 <code>onRequestGet</code> + Web Crypto 签名的 <code>api/inspect.js</code>），点击下方按钮直接发起真实边缘请求：</p>
+      </div>
+
+      <div style="margin: 18px 0 48px; padding: 20px 24px; border-radius: var(--radius-md); border: 1px solid var(--accent-border); background: var(--bg-subtle); display: flex; flex-direction: column; gap: 14px;">
+        <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px;">
+          <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.84rem; color: var(--text-strong); display: flex; flex-wrap: wrap; gap: 10px; align-items: center;">
+            <span><span style="padding: 3px 8px; border-radius: 5px; background: var(--accent-soft); color: var(--accent); font-weight: 700; margin-right: 6px;">FN 1</span><code>/api/hello</code></span>
+            <span style="color: var(--text-faint);">|</span>
+            <span><span style="padding: 3px 8px; border-radius: 5px; background: var(--accent-soft); color: var(--accent); font-weight: 700; margin-right: 6px;">FN 2</span><code>/api/inspect</code></span>
+          </div>
+          <div style="display: flex; flex-wrap: wrap; gap: 10px;">
+            <button type="button" class="btn-primary" id="btn-test-api-hello" style="padding: 8px 15px; font-size: 0.84rem;">
+              <span>⚡ 调用 /api/hello</span>
+            </button>
+            <button type="button" class="btn-primary" id="btn-test-api-inspect" style="padding: 8px 15px; font-size: 0.84rem; background: var(--accent); color: #fff;">
+              <span>🔍 调用 /api/inspect (EdgeOne 探针 + WebCrypto)</span>
+            </button>
+            <a href="/api/inspect?seed=live-check" target="_blank" rel="noopener" class="btn-secondary" style="padding: 8px 14px; font-size: 0.84rem; text-decoration: none;">
+              <span>新窗口打开 JSON ↗</span>
+            </a>
+          </div>
+        </div>
+        <pre id="api-hello-output" style="padding: 14px 16px; border-radius: 8px; background: #0b101b; color: #34d399; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; overflow-x: auto; line-height: 1.55; border: 1px solid #1e293b;">// 点击上方「调用 /api/hello」或「调用 /api/inspect」查看实时返回的 JSON 与 X-MyShip-Function-Sha256 诊断头...</pre>
+      </div>
+
+      <div class="section-head" style="margin-top: 48px;">
+        <h2>🎬 MyShip 2026 产品发布与全景愿景大片 (Keynote Video)</h2>
+        <p>由 Remotion 编程级动态图形引擎 + 神经网络中文配音 + 120 BPM 原创电子合成器配乐打造，全景呈现 Phase 0/1 核心架构与 Phase 2/3 远期蓝图。</p>
+      </div>
+
+      <div style="margin: 24px 0 56px; border-radius: 22px; overflow: hidden; border: 1px solid rgba(56, 189, 248, 0.35); background: rgba(7, 11, 22, 0.9); box-shadow: 0 28px 70px rgba(0, 0, 0, 0.55), 0 0 40px rgba(56, 189, 248, 0.14);">
+        <video
+          controls
+          preload="none"
+          poster="/keynote-poster.jpg"
+          src="/myship-promo.mp4"
+          style="width: 100%; display: block; aspect-ratio: 16 / 9; background: #050811;"
+        ></video>
       </div>
 
       <div class="section-head">
@@ -1183,24 +1339,36 @@ function generateSiteHtml(parsedDocs, searchEntries, mcpConfig) {
     }
 
     const TERM_SCENES = {
-      deploy: \`<span class="t-dim"># 在任意前端项目中直接输入 6 个字母:</span>
+      deploy: \`<span class="t-dim"># 在任意全栈项目中直接输入 6 个字母 (自动扫描静态产物 + api/*.js):</span>
 <span class="t-cmd">$ myship</span>
 📁 已自动读取项目命名空间配置: .myship/project.json [项目: app1]
 ☁️  正在向腾讯云 COS 执行 CAS 去重部署... [项目命名空间: app1]
   ⚡ [COS CAS 命中跳过] /assets/vendor.js (sha256: 6f3ffee9d9...)
   ⬆️ [COS 新块上传]     /index.html -> blobs/5adc23fa1d... (2,194 B)
+  ⚡ [EdgeOne 独立云函数同步] 已部署至独立边缘函数: myship-api-app1 (ef-ti42dfy0)
 
 <span class="t-ok">✅ 云端部署完成! [项目: app1] Deployment ID: dpl_6e46ed99</span>
    🌐 构建快照域名: <span class="t-url">https://app1-6e46ed99.ship.example.com</span>
-   🌐 项目默认主域: <span class="t-url">https://app1.ship.example.com</span>\`,
-      namespace: \`<span class="t-dim"># 在 app1 目录下执行 myship ls，默认仅展示当前项目的版本与域名:</span>
+   🌐 项目默认主域: <span class="t-url">https://app1.ship.example.com</span>
+   ⚡ 边缘函数路由: <span class="t-url">https://app1.ship.example.com/api/hello</span>\`,
+      serverless: \`<span class="t-dim"># 独立统一 API 边缘函数按子域名快照精确寻址 /api/*，多项目同名路由互不串线:</span>
+<span class="t-cmd">$ curl -i https://app1.ship.example.com/api/hello</span>
+HTTP/2 200 
+content-type: application/json; charset=UTF-8
+x-myship-engine: EdgeOne-API-Worker/2.1-SchemeA
+x-myship-function-worker: myship-api-app1
+x-myship-deployment-id: dpl_6e46ed99
+x-myship-function-route: /api/hello
+x-myship-function-sha256: 36908c55
+
+<span class="t-ok">{"ok":true,"version":"v1","deploymentId":"dpl_6e46ed99","route":"/api/hello"}</span>\`,
+      namespace: \`<span class="t-dim"># 在 app1 目录下执行 myship ls，默认仅展示当前项目的版本与正式域名映射:</span>
 <span class="t-cmd">$ myship ls</span>
 === 📦 当前项目命名空间: [app1] (云端全局 CAS 唯一块: 6 个) ===
 
-=== 🌐 [app1] 线上子域名路由映射表 (3 个) ===
-  - <span class="t-url">https://app1.ship.example.com</span>          -->  dpl_6e46ed99
-  - <span class="t-url">https://app1-v2.ship.example.com</span>       -->  dpl_4f788e9d
-  - <span class="t-url">https://app1-6e46ed99.ship.example.com</span> -->  dpl_6e46ed99\`,
+=== 🌐 [app1] 线上子域名路由映射表 (2 个) ===
+  - <span class="t-url">https://app1.ship.example.com</span>    -->  dpl_6e46ed99
+  - <span class="t-url">https://app1-v2.ship.example.com</span> -->  dpl_4f788e9d\`,
       rollback: \`<span class="t-dim"># 线上发现问题？无需重新构建，0 秒把项目主域名回退到上一版:</span>
 <span class="t-cmd">$ myship rollback</span>
 ⏪ 正在将 https://app1.ship.example.com 从 dpl_4f788e9d 回滚至上一版本 dpl_6e46ed99...
@@ -1322,6 +1490,38 @@ function generateSiteHtml(parsedDocs, searchEntries, mcpConfig) {
     document.getElementById('hero-copy-cmd').addEventListener('click', () => {
       copyText('npm i -g @myship/cli && myship login', '✅ 已复制安装与登录命令');
     });
+
+    const btnTestApi = document.getElementById('btn-test-api-hello');
+    const btnTestInspect = document.getElementById('btn-test-api-inspect');
+    const apiOutput = document.getElementById('api-hello-output');
+    async function runLiveApiTest(endpoint) {
+      if (!apiOutput) return;
+      apiOutput.textContent = \`⏳ 正在请求边缘云函数 GET \${endpoint} ...\`;
+      const t0 = performance.now();
+      try {
+        const res = await fetch(endpoint);
+        const elapsed = Math.round(performance.now() - t0);
+        const data = await res.json();
+        const headersInfo = [
+          \`// HTTP \${res.status} (\${elapsed} ms) | Endpoint: \${endpoint}\`,
+          \`// X-MyShip-Engine:          \${res.headers.get('x-myship-engine') || '-'}\`,
+          \`// X-MyShip-Function-Worker: \${res.headers.get('x-myship-function-worker') || '-'}\`,
+          \`// X-MyShip-Deployment-Id:   \${res.headers.get('x-myship-deployment-id') || '-'}\`,
+          \`// X-MyShip-Function-Route:  \${res.headers.get('x-myship-function-route') || '-'}\`,
+          \`// X-MyShip-Function-Sha256: \${res.headers.get('x-myship-function-sha256') || '-'}\`,
+          \`// X-MyShip-Function-Mode:   \${res.headers.get('x-myship-function-mode') || '-'}\`,
+        ].join('\\n');
+        apiOutput.textContent = headersInfo + '\\n' + JSON.stringify(data, null, 2);
+      } catch (err) {
+        apiOutput.textContent = '// 请求失败: ' + err.message;
+      }
+    }
+    if (btnTestApi) {
+      btnTestApi.addEventListener('click', () => runLiveApiTest('/api/hello?name=EdgeDeveloper'));
+    }
+    if (btnTestInspect) {
+      btnTestInspect.addEventListener('click', () => runLiveApiTest('/api/inspect?seed=portal-live'));
+    }
 
     document.querySelectorAll('[data-copy-target]').forEach(btn => {
       btn.addEventListener('click', () => {

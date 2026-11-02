@@ -1,13 +1,14 @@
 /**
- * demo-run.mjs — 无需任何云端账号的端到端 CAS 全链路离线沙盒自测
+ * demo-run.mjs — 无需任何云端账号的端到端 CAS 全栈离线沙盒自测 (Phase 0 + Phase 1 + Phase 2)
  *
  * 自动演示：
- * 1. 创建包含 2 个文件的构建产物 (index.html + assets/common.js) 并发布为 v1 版本
- * 2. 仅修改 index.html，发布为 v2 版本 -> 验证 assets/common.js 命中 CAS 去重跳过上传
- * 3. 通过泛域名边缘网关同时请求 v1.ship.localhost 和 v2.ship.localhost -> 验证多版本独立共存
- * 4. 将 prod.ship.localhost 从 v2 秒级回滚到 v1 -> 验证 0 秒原子切流生效
+ * 1. 创建包含前端静态产物 (index.html + assets/common.js) 与后端约定式云函数 (api/hello.js) 的 v1 版本
+ * 2. 修改 index.html 与 api/hello.js 并发布为 v2 版本 -> 验证未变动的 assets/common.js 命中 CAS 去重跳过上传
+ * 3. 通过泛域名边缘网关同时请求 v1.ship.localhost 与 v2.ship.localhost 的前端与 /api/hello -> 验证全栈多版本独立共存
+ * 4. 将 prod.ship.localhost 从 v2 秒级回滚到 v1 -> 验证前端 UI 与后端 /api/hello 在同一毫秒原子切流生效！
  */
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,9 +25,10 @@ const demoStorageDir = resolve(__dirname, '.cas-storage');
 rmSync(demoBuildDir, { recursive: true, force: true });
 rmSync(demoStorageDir, { recursive: true, force: true });
 mkdirSync(resolve(demoBuildDir, 'assets'), { recursive: true });
+mkdirSync(resolve(demoBuildDir, 'api'), { recursive: true });
 
 console.log('==============================================================');
-console.log('🚀 步骤 1: 构建并发布【第 1 版 (v1)】，同时绑定 v1 与 prod 域名');
+console.log('🚀 步骤 1: 构建并发布【全栈第 1 版 (v1)】(静态 UI + api/hello.js)');
 console.log('==============================================================');
 writeFileSync(
   resolve(demoBuildDir, 'assets/common.js'),
@@ -38,20 +40,50 @@ writeFileSync(
   '<h1>Hello from Release V1 (第一版构建产物)</h1>',
   'utf8'
 );
+writeFileSync(
+  resolve(demoBuildDir, 'api/hello.js'),
+  `export default async function handler(request, context) {
+  return Response.json({
+    ok: true,
+    apiVersion: 'v1',
+    message: 'Backend API V1',
+    deploymentId: context.deploymentId,
+    subdomain: context.subdomain,
+  });
+}
+`,
+  'utf8'
+);
 
 const dpl1 = deployDirectory(demoBuildDir, {
   storageDir: demoStorageDir,
   aliases: ['v1', 'prod'],
 });
-assert.equal(dpl1.manifest.stats.uploadedBlobs, 2);
+assert.equal(dpl1.manifest.stats.totalFiles, 2);
+assert.equal(dpl1.manifest.stats.totalFunctions, 1);
+assert.equal(dpl1.manifest.stats.uploadedBlobs, 3);
 assert.equal(dpl1.manifest.stats.reusedBlobs, 0);
 
 console.log('\n==============================================================');
-console.log('🚀 步骤 2: 仅修改 index.html 并发布【第 2 版 (v2)】，测试 CAS 增量去重');
+console.log('🚀 步骤 2: 修改 index.html 与 api/hello.js 发布【全栈第 2 版 (v2)】');
 console.log('==============================================================');
 writeFileSync(
   resolve(demoBuildDir, 'index.html'),
   '<h1>Hello from Release V2 (第二版全新界面)</h1>',
+  'utf8'
+);
+writeFileSync(
+  resolve(demoBuildDir, 'api/hello.js'),
+  `export default async function handler(request, context) {
+  return Response.json({
+    ok: true,
+    apiVersion: 'v2',
+    message: 'Backend API V2 (Schema Upgraded)',
+    deploymentId: context.deploymentId,
+    subdomain: context.subdomain,
+  });
+}
+`,
   'utf8'
 );
 
@@ -59,52 +91,111 @@ const dpl2 = deployDirectory(demoBuildDir, {
   storageDir: demoStorageDir,
   aliases: ['v2', 'prod'],
 });
-assert.equal(dpl2.manifest.stats.uploadedBlobs, 1);
+assert.equal(dpl2.manifest.stats.uploadedBlobs, 2);
 assert.equal(dpl2.manifest.stats.reusedBlobs, 1);
 
 console.log('\n==============================================================');
-console.log('🌐 步骤 3: 通过泛域名边缘网关同时请求不同子域名，验证多版本独立共存');
+console.log('🌐 步骤 3: 通过泛域名边缘网关同时请求不同子域名，验证全栈多版本共存');
 console.log('==============================================================');
 const adapter = createLocalStorageAdapter(demoStorageDir);
 
 async function fetchFromEdge(host, path = '/') {
   const req = new Request(`http://${host}${path}`, { headers: { host } });
   const res = await handleEdgeRequest(req, adapter);
+  const text = await res.text();
   return {
     status: res.status,
     deploymentId: res.headers.get('x-deployment-id'),
-    body: await res.text(),
+    body: text,
   };
 }
 
-const resV1 = await fetchFromEdge('v1.ship.localhost:4100');
-const resV2 = await fetchFromEdge('v2.ship.localhost:4100');
-const resImmutable1 = await fetchFromEdge(`${dpl1.immutableSubdomain}.ship.localhost:4100`);
-const resProdBeforeRollback = await fetchFromEdge('prod.ship.localhost:4100');
+const resV1 = await fetchFromEdge('v1.ship.localhost:4100', '/');
+const resV2 = await fetchFromEdge('v2.ship.localhost:4100', '/');
+const apiV1 = JSON.parse((await fetchFromEdge('v1.ship.localhost:4100', '/api/hello')).body);
+const apiV2 = JSON.parse((await fetchFromEdge('v2.ship.localhost:4100', '/api/hello')).body);
+const resProdBeforeRollback = await fetchFromEdge('prod.ship.localhost:4100', '/');
+const apiProdBeforeRollback = JSON.parse(
+  (await fetchFromEdge('prod.ship.localhost:4100', '/api/hello')).body
+);
 
-console.log(`  [请求 v1.ship.localhost]       -> 命中版本 ${resV1.deploymentId} | 内容: ${resV1.body}`);
-console.log(`  [请求 v2.ship.localhost]       -> 命中版本 ${resV2.deploymentId} | 内容: ${resV2.body}`);
-console.log(
-  `  [请求 ${dpl1.immutableSubdomain}.ship.localhost] -> 命中版本 ${resImmutable1.deploymentId} | 内容: ${resImmutable1.body}`
-);
-console.log(
-  `  [请求 prod.ship.localhost]     -> 命中版本 ${resProdBeforeRollback.deploymentId} | 内容: ${resProdBeforeRollback.body}`
-);
+console.log(`  [前端 v1.ship.localhost/]          -> 版本 ${resV1.deploymentId} | ${resV1.body}`);
+console.log(`  [后端 v1.ship.localhost/api/hello] -> 版本 ${apiV1.deploymentId} | apiVersion=${apiV1.apiVersion} (${apiV1.message})`);
+console.log(`  [前端 v2.ship.localhost/]          -> 版本 ${resV2.deploymentId} | ${resV2.body}`);
+console.log(`  [后端 v2.ship.localhost/api/hello] -> 版本 ${apiV2.deploymentId} | apiVersion=${apiV2.apiVersion} (${apiV2.message})`);
 
 assert.equal(resV1.body, '<h1>Hello from Release V1 (第一版构建产物)</h1>');
+assert.equal(apiV1.apiVersion, 'v1');
 assert.equal(resV2.body, '<h1>Hello from Release V2 (第二版全新界面)</h1>');
+assert.equal(apiV2.apiVersion, 'v2');
 assert.equal(resProdBeforeRollback.body, '<h1>Hello from Release V2 (第二版全新界面)</h1>');
+assert.equal(apiProdBeforeRollback.apiVersion, 'v2');
 
 console.log('\n==============================================================');
-console.log('⚡ 步骤 4: 0 秒将 prod.ship.localhost 一键回滚到第 1 版');
+console.log('⚡ 步骤 4: 0 秒将 prod.ship.localhost 一键原子回滚到第 1 版 (前后端同步切换)');
 console.log('==============================================================');
 setAlias('prod', dpl1.deploymentId, { storageDir: demoStorageDir });
-const resProdAfterRollback = await fetchFromEdge('prod.ship.localhost:4100');
+const resProdAfterRollback = await fetchFromEdge('prod.ship.localhost:4100', '/');
+const apiProdAfterRollback = JSON.parse(
+  (await fetchFromEdge('prod.ship.localhost:4100', '/api/hello')).body
+);
+
 console.log(
-  `  [回滚后请求 prod.ship.localhost] -> 命中版本 ${resProdAfterRollback.deploymentId} | 内容: ${resProdAfterRollback.body}`
+  `  [回滚后前端 prod.ship.localhost/]          -> 命中版本 ${resProdAfterRollback.deploymentId} | ${resProdAfterRollback.body}`
+);
+console.log(
+  `  [回滚后后端 prod.ship.localhost/api/hello] -> 命中版本 ${apiProdAfterRollback.deploymentId} | apiVersion=${apiProdAfterRollback.apiVersion} (${apiProdAfterRollback.message})`
 );
 assert.equal(resProdAfterRollback.body, '<h1>Hello from Release V1 (第一版构建产物)</h1>');
+assert.equal(apiProdAfterRollback.apiVersion, 'v1');
+assert.equal(apiProdAfterRollback.deploymentId, dpl1.deploymentId);
 
 console.log('\n==============================================================');
-console.log('🎉 离线沙盒验证全部通过！当前 CAS 池仅存了 3 个文件块，却支撑了 2 个完整版本与 5 个独立子域名！');
+console.log('🔗 步骤 5: 验证【方案 C · SCF 函数 URL 反向代理扩展槽 (upstreamUrl)】');
+console.log('==============================================================');
+const mockScfServer = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'application/json; charset=UTF-8' });
+  res.end(
+    JSON.stringify({
+      ok: true,
+      engine: 'TencentCloud-SCF-FunctionURL-Mock',
+      receivedDeploymentId: req.headers['x-myship-deployment-id'],
+      receivedSubdomain: req.headers['x-myship-subdomain'],
+      receivedRoute: req.headers['x-myship-function-route'],
+    })
+  );
+});
+await new Promise((r) => mockScfServer.listen(0, '127.0.0.1', r));
+const scfPort = mockScfServer.address().port;
+
+writeFileSync(
+  resolve(demoBuildDir, 'api/heavy-task.js'),
+  `export const upstreamUrl = 'http://127.0.0.1:${scfPort}/scf-entry';\n`,
+  'utf8'
+);
+const dpl3 = deployDirectory(demoBuildDir, {
+  storageDir: demoStorageDir,
+  aliases: ['v3', 'prod'],
+});
+assert.equal(dpl3.manifest.functions['/api/heavy-task'].runtime, 'scf-url');
+assert.equal(
+  dpl3.manifest.functions['/api/heavy-task'].upstreamUrl,
+  `http://127.0.0.1:${scfPort}/scf-entry`
+);
+
+const scfProxyRes = JSON.parse(
+  (await fetchFromEdge('prod.ship.localhost:4100', '/api/heavy-task')).body
+);
+mockScfServer.close();
+
+console.log(
+  `  [SCF 函数 URL 反向代理 prod.ship.localhost/api/heavy-task] -> 透传版本 ${scfProxyRes.receivedDeploymentId} | engine=${scfProxyRes.engine}`
+);
+assert.equal(scfProxyRes.ok, true);
+assert.equal(scfProxyRes.receivedDeploymentId, dpl3.deploymentId);
+assert.equal(scfProxyRes.receivedSubdomain, 'prod');
+assert.equal(scfProxyRes.receivedRoute, '/api/heavy-task');
+
+console.log('\n==============================================================');
+console.log('🎉 全栈沙盒验证全部通过！方案 A (边缘 V8 原生执行) 与 方案 C (SCF 函数 URL 反向代理扩展槽) 均已就绪！');
 console.log('==============================================================');
