@@ -161,17 +161,38 @@ export async function fetch(request, context) {
     try {
       body = await request.json();
     } catch {}
-    const key = String(body.key || 'uploads/demo.txt').replace(/^\/+/, '');
-    const uploadMethod = String(body.method || 'PUT').toUpperCase();
+    const key = String(body.key || 'demo/hello.txt').replace(/^\/+/, '');
+    const reqMethod = String(body.method || 'GET').toUpperCase();
+
+    // 若请求的是 GET 预览预签名且默认示例文件尚未创建，先自动写入一份示例内容，确保用户在浏览器直接打开该链接即可看到内容
+    if (reqMethod === 'GET' && key === 'demo/hello.txt') {
+      const existing = await context.files.get(key);
+      if (!existing) {
+        await context.files.put(key, `Hello from MyShip Full-Stack Starter! (${new Date().toISOString()})`, {
+          contentType: 'text/plain; charset=utf-8',
+        });
+      }
+    }
+
     const presignedUrl = await context.files.presignUrl(key, {
-      method: uploadMethod,
+      method: reqMethod,
       expiresIn: 600,
     });
+    const downloadUrl =
+      reqMethod === 'GET'
+        ? presignedUrl
+        : await context.files.presignUrl('demo/hello.txt', { method: 'GET', expiresIn: 600 });
+
     return Response.json({
       ok: true,
       key,
-      method: uploadMethod,
+      method: reqMethod,
       presignedUrl,
+      browserOpenableGetUrl: downloadUrl,
+      note:
+        reqMethod === 'PUT'
+          ? '注意: presignedUrl 为 PUT 专用上传签名 (需用 fetch/curl -X PUT 调用)；若要在浏览器地址栏直接打开 (GET 请求)，请访问 browserOpenableGetUrl。'
+          : '可直接复制 presignedUrl 到浏览器地址栏打开查看私有文件内容。',
     });
   }
 

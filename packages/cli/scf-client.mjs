@@ -1029,14 +1029,17 @@ export async function fetchAndPrintScfLogs({
   project = null,
   cwd = process.cwd(),
   region = null,
+  functionName: explicitFunctionName = null,
   limit = 20,
   errorsOnly = false,
   isLocal = false,
+  silent = false,
 } = {}) {
   const ctx = detectProjectContext(cwd, project);
   const cleanProj = project ? normalizeDomainToken(project) : ctx.project;
   const targetRegion = region || ctx.backend?.region || inferCosRegion();
-  const functionName = ctx.backend?.functionName || resolveScfFunctionName(cleanProj);
+  const functionName =
+    explicitFunctionName || ctx.backend?.functionName || resolveScfFunctionName(cleanProj);
 
   const logs = [];
   const seenKeys = new Set();
@@ -1107,6 +1110,10 @@ export async function fetchAndPrintScfLogs({
     ? logs.filter((l) => l.level === 'ERROR' || (l.status && l.status >= 400) || l.error)
     : logs;
   const displayList = filtered.slice(0, limit);
+
+  if (silent) {
+    return displayList;
+  }
 
   console.log(
     `=== 📋 MyShip 后端运行日志 [项目: ${cleanProj} | 函数: ${functionName}] (显示 ${displayList.length}/${filtered.length} 条) ===`

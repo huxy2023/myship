@@ -1,6 +1,6 @@
 {
   "name": "@myship/cli-core",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "license": "MIT",
   "type": "module",
   "description": "MyShip — Zero-dependency CAS deployment & wildcard routing CLI",

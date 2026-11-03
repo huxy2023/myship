@@ -115,10 +115,13 @@
 
       <div class="card">
         <h2><span>3. 文件存储与预签名</span><code>context.files</code></h2>
-        <p>按 <code>files/&lt;project&gt;/</code> 路径前缀隔离，支持服务端读写与前端预签名直传。</p>
+        <p>按 <code>files/&lt;project&gt;/</code> 路径前缀隔离，支持服务端读写与私有文件预签名访问。</p>
         <div class="row">
           <button type="button" id="btn-put-file">写入 hello.txt</button>
-          <button type="button" class="secondary" id="btn-presign">生成预签名 URL</button>
+          <button type="button" class="secondary" id="btn-presign">生成浏览器预签名链接 (GET)</button>
+        </div>
+        <div id="presign-link-box" style="display:none; margin-top:4px; font-size:0.82rem;">
+          <a id="presign-open-link" href="#" target="_blank" rel="noopener" style="color: var(--accent); text-decoration: underline;">🔗 点击在新窗口直接打开私有文件 (GET 预签名 URL) ↗</a>
         </div>
       </div>
     </div>
@@ -154,11 +157,26 @@
         method: 'POST',
         body: JSON.stringify({ key: 'demo/hello.txt', content: 'Hello from MyShip Full-Stack Starter!' }),
       });
-    document.getElementById('btn-presign').onclick = () =>
-      callApi('/api/files/presign', {
-        method: 'POST',
-        body: JSON.stringify({ key: 'uploads/direct-avatar.png', method: 'PUT' }),
-      });
+    document.getElementById('btn-presign').onclick = async () => {
+      out.textContent = '⏳ 请求 POST /api/files/presign ...';
+      try {
+        const res = await fetch('/api/files/presign', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key: 'demo/hello.txt', method: 'GET' }),
+        });
+        const data = await res.json();
+        out.textContent = JSON.stringify(data, null, 2);
+        if (data.presignedUrl) {
+          const box = document.getElementById('presign-link-box');
+          const link = document.getElementById('presign-open-link');
+          link.href = data.presignedUrl;
+          box.style.display = 'block';
+        }
+      } catch (err) {
+        out.textContent = '❌ 请求异常: ' + err.message;
+      }
+    };
 
     callApi('/api/health');
   </script>

@@ -3,13 +3,25 @@ import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
   cosGetJson,
+  cosListKeys,
+  getEffectiveEndpoints,
   assertCloudEndpointsConfigured,
 } from './cos-client.mjs';
 import { renderConsoleHtml } from './console-ui.mjs';
 import {
+  fetchAndPrintScfLogs,
+  resolveScfFunctionName,
+} from './scf-client.mjs';
+import {
+  createLocalPersistentStorage,
+  createLocalFileStorage,
+  createCloudStorage,
+} from './storage-client.mjs';
+import {
   DEFAULT_STORAGE_DIR,
   normalizeDomainToken,
   normalizeSubdomain,
+  inferCosRegion,
   detectProjectContext,
   resolveNamespacedSubdomain,
   inferProjectFromRecord,
@@ -18,6 +30,7 @@ import {
 import {
   assertValidEnvKey,
   maskEnvValue,
+  parseDotEnv,
   getLocalProjectEnv,
   getRemoteProjectEnv,
 } from './env-manager.mjs';
@@ -159,6 +172,13 @@ export function computeManifestDiff(baseManifest, targetManifest) {
       modified: fnsModified,
       deleted: fnsDeleted,
       unchangedCount: fnsUnchangedCount,
+    },
+    backend: {
+      changed:
+        JSON.stringify(baseManifest.backend || null) !==
+        JSON.stringify(targetManifest.backend || null),
+      before: baseManifest.backend || null,
+      after: targetManifest.backend || null,
     },
   };
 }
@@ -455,6 +475,37 @@ export function createConsoleRequestHandler({
             count: Object.keys(updated).length,
           });
         }
+        if (action === 'set-batch' || action === 'import') {
+          const validArgs = [];
+          if (typeof body.rawContent === 'string') {
+            const parsed = parseDotEnv(body.rawContent);
+            for (const [k, v] of Object.entries(parsed)) {
+              validArgs.push(`${k}=${v}`);
+            }
+          } else if (Array.isArray(body.pairs)) {
+            for (const item of body.pairs) {
+              const k = assertValidEnvKey(item.key || '');
+              const v = String(item.value ?? '');
+              validArgs.push(`${k}=${v}`);
+            }
+          }
+          if (validArgs.length === 0) {
+            return sendJson(res, 400, { ok: false, error: '请提供至少一项合法的 KEY=VALUE 变量' });
+          }
+          const updated = await runEnvCommand({
+            subcommand: 'set',
+            args: validArgs,
+            project,
+            isLocal,
+            storageDir,
+            cwd,
+          });
+          return sendJson(res, 200, {
+            ok: true,
+            project,
+            count: Object.keys(updated).length,
+          });
+        }
         if (action === 'rm' || action === 'delete') {
           const key = assertValidEnvKey(body.key || '');
           const updated = await runEnvCommand({
@@ -557,6 +608,173 @@ export function createConsoleRequestHandler({
         }
 
         return sendJson(res, 400, { ok: false, error: `未知的删除类型: ${rmType}` });
+      }
+
+      if (pathname === '/api/console/logs' && method === 'GET') {
+        const cwdCtx = detectProjectContext(cwd);
+        const project =
+          normalizeDomainToken(urlObj.searchParams.get('project') || '') || cwdCtx.project;
+        const limit = Math.min(
+          Math.max(Number.parseInt(urlObj.searchParams.get('limit') || '30', 10) || 30, 1),
+          100
+        );
+        const errorsOnly =
+          urlObj.searchParams.get('errorsOnly') === '1' ||
+          urlObj.searchParams.get('errorsOnly') === 'true';
+
+        // 按选中项目的已部署快照解析函数名与地域，仅当启动目录与选中项目一致时才回退启动目录配置；
+        // Manifest 查询失败时直接向上抛出返回错误，不吞掉异常猜测函数名
+        const isSameCwdProject = cwdCtx.project === project;
+        const state = await loadConsoleStateData({ isLocal, storageDir, cwd });
+        const projGroup = state.projects.find((p) => p.name === project);
+        let manifestBackend = null;
+        if (projGroup) {
+          const primaryAlias =
+            projGroup.aliases.find((a) => a.subdomain === project) || projGroup.aliases[0] || null;
+          const activeM =
+            (primaryAlias &&
+              projGroup.manifests.find((m) => m.id === primaryAlias.deploymentId)) ||
+            projGroup.manifests[0] ||
+            null;
+          const latestWithB = projGroup.manifests.find(
+            (m) => m.backend && m.backend.mode === 'scf-web'
+          );
+          manifestBackend = activeM?.backend || latestWithB?.backend || null;
+        }
+
+        const functionName =
+          manifestBackend?.functionName ||
+          (isSameCwdProject ? cwdCtx.backend?.functionName : null) ||
+          resolveScfFunctionName(project);
+        const region =
+          manifestBackend?.region ||
+          (isSameCwdProject ? cwdCtx.backend?.region : null) ||
+          inferCosRegion();
+
+        const logs = await fetchAndPrintScfLogs({
+          project,
+          cwd,
+          region,
+          functionName,
+          limit,
+          errorsOnly,
+          isLocal,
+          silent: true,
+        });
+
+        return sendJson(res, 200, {
+          ok: true,
+          project,
+          functionName,
+          region: region || undefined,
+          errorsOnly,
+          count: logs.length,
+          logs,
+        });
+      }
+
+      if (pathname === '/api/console/resources' && method === 'GET') {
+        const cwdCtx = detectProjectContext(cwd);
+        const project =
+          normalizeDomainToken(urlObj.searchParams.get('project') || '') || cwdCtx.project;
+        const isSameCwdProject = cwdCtx.project === project;
+        const localResourcesCfg = isSameCwdProject ? cwdCtx.resources : null;
+
+        const rawVars = isLocal
+          ? getLocalProjectEnv(project, storageDir)
+          : await getRemoteProjectEnv(project);
+
+        const dbProvider =
+          rawVars.MYSHIP_DB_PROVIDER ||
+          localResourcesCfg?.db?.provider ||
+          (rawVars.TURSO_DATABASE_URL
+            ? 'turso'
+            : rawVars.NEON_DATABASE_URL
+            ? 'neon'
+            : rawVars.CF_D1_DATABASE_ID
+            ? 'd1'
+            : rawVars.MYSQL_URL
+            ? 'mysql'
+            : rawVars.DATABASE_URL || rawVars.PGHOST
+            ? 'pg'
+            : null);
+
+        const dbIsolation =
+          rawVars.MYSHIP_DB_ISOLATION || localResourcesCfg?.db?.isolation || 'default';
+        const dbTarget =
+          rawVars.PG_SCHEMA ||
+          rawVars.PGDATABASE ||
+          rawVars.MYSQL_DATABASE ||
+          rawVars.CF_D1_DATABASE_NAME ||
+          rawVars.TURSO_DATABASE_URL ||
+          rawVars.NEON_DATABASE_URL ||
+          rawVars.DATABASE_URL ||
+          '';
+
+        let dataKeys = [];
+        let fileKeys = [];
+        if (isLocal) {
+          const localData = createLocalPersistentStorage(cwd, project);
+          const localFiles = createLocalFileStorage(cwd, project);
+          dataKeys = await localData.list();
+          fileKeys = await localFiles.list();
+        } else {
+          assertCloudEndpointsConfigured();
+          const [rawDataKeys, rawFileKeys] = await Promise.all([
+            cosListKeys(`data/${project}/`),
+            cosListKeys(`files/${project}/`),
+          ]);
+          dataKeys = rawDataKeys
+            .map((k) => k.slice(`data/${project}/`.length).replace(/\.json$/i, ''))
+            .filter(Boolean);
+          fileKeys = rawFileKeys
+            .map((k) => k.slice(`files/${project}/`.length))
+            .filter((k) => k && !k.endsWith('.__meta__.json'));
+        }
+
+        return sendJson(res, 200, {
+          ok: true,
+          project,
+          db: {
+            enabled: Boolean(dbProvider),
+            provider: dbProvider || 'sqlite-local',
+            isolation: dbIsolation,
+            targetSummary: dbTarget
+              ? maskEnvValue(dbTarget)
+              : isLocal
+              ? '.myship/data/local.sqlite'
+              : '未绑定云端数据库',
+          },
+          storage: {
+            enabled: true,
+            dataPrefix: `data/${project}/`,
+            filesPrefix: `files/${project}/`,
+            dataKeys,
+            fileKeys,
+          },
+        });
+      }
+
+      if (pathname === '/api/console/file-presign' && method === 'GET') {
+        const project =
+          normalizeDomainToken(urlObj.searchParams.get('project') || '') ||
+          detectProjectContext(cwd).project;
+        const key = String(urlObj.searchParams.get('key') || '').trim();
+        if (!key) {
+          return sendJson(res, 400, { ok: false, error: '请提供要生成预览链接的对象存储文件 key' });
+        }
+        if (isLocal) {
+          const localFiles = createLocalFileStorage(cwd, project);
+          const url = await localFiles.presignUrl(key, { method: 'GET', expiresSec: 900 });
+          return sendJson(res, 200, { ok: true, project, key, url, expiresIn: 900 });
+        }
+        const { cosOrigin } = getEffectiveEndpoints();
+        const cloudStore = createCloudStorage(project, {
+          ...process.env,
+          MYSHIP_COS_ORIGIN: cosOrigin,
+        });
+        const url = await cloudStore.files.presignUrl(key, { method: 'GET', expiresSec: 900 });
+        return sendJson(res, 200, { ok: true, project, key, url, expiresIn: 900 });
       }
 
       return sendJson(res, 404, { ok: false, error: `Unknown Console API: ${method} ${pathname}` });

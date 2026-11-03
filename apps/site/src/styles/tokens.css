@@ -1,0 +1,141 @@
+/**
+ * apps/site/src/styles/tokens.css
+ * MyShip Design System Tokens — High-Craft Light & Dark Theme Variables
+ */
+:root {
+  --bg: #ffffff;
+  --bg-subtle: #f8fafc;
+  --bg-muted: #f1f5f9;
+  --bg-elevated: #ffffff;
+  --bg-glass: rgba(255, 255, 255, 0.86);
+  --specular-top: rgba(255, 255, 255, 0.9);
+  --text-strong: #090d16;
+  --text-body: #334155;
+  --text-soft: #64748b;
+  --text-faint: #94a3b8;
+  --border: #e2e8f0;
+  --border-strong: #cbd5e1;
+  --accent: #0284c7;
+  --accent-hover: #0369a1;
+  --accent-soft: rgba(2, 132, 199, 0.08);
+  --accent-border: rgba(2, 132, 199, 0.26);
+  --code-bg: #f8fafc;
+  --code-header-bg: #f1f5f9;
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-md: 0 12px 32px -6px rgba(15, 23, 42, 0.08), 0 4px 12px -2px rgba(15, 23, 42, 0.04);
+  --shadow-pop: 0 20px 48px -6px rgba(15, 23, 42, 0.14), 0 6px 16px -3px rgba(15, 23, 42, 0.06);
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 22px;
+  --nav-h: 62px;
+  --ease-spring: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* Syntax Highlighting Tokens (Light Mode — GitHub Light Inspired) */
+  --tok-kw: #cf222e;
+  --tok-str: #0a3069;
+  --tok-cmt: #6e7781;
+  --tok-fn: #8250df;
+  --tok-num: #0550ae;
+  --tok-flag: #953800;
+  --tok-cmd: #0550ae;
+  --tok-prop: #116329;
+  --tok-var: #953800;
+  --tok-url: #0969da;
+  --tok-builtin: #8250df;
+  --tok-prompt: #0284c7;
+  --tok-op: #cf222e;
+
+  /* Callout Semantic Tokens */
+  --callout-note-bg: rgba(2, 132, 199, 0.06);
+  --callout-note-border: rgba(2, 132, 199, 0.28);
+  --callout-note-fg: #0284c7;
+
+  --callout-tip-bg: rgba(16, 185, 129, 0.07);
+  --callout-tip-border: rgba(16, 185, 129, 0.3);
+  --callout-tip-fg: #059669;
+
+  --callout-important-bg: rgba(124, 58, 237, 0.06);
+  --callout-important-border: rgba(124, 58, 237, 0.28);
+  --callout-important-fg: #7c3aed;
+
+  --callout-warning-bg: rgba(245, 158, 11, 0.08);
+  --callout-warning-border: rgba(245, 158, 11, 0.34);
+  --callout-warning-fg: #d97706;
+}
+
+html.dark {
+  --bg: #070a12;
+  --bg-subtle: #0d1320;
+  --bg-muted: #141d2f;
+  --bg-elevated: #0f1726;
+  --bg-glass: rgba(7, 10, 18, 0.84);
+  --specular-top: rgba(255, 255, 255, 0.07);
+  --text-strong: #f8fafc;
+  --text-body: #cbd5e1;
+  --text-soft: #94a3b8;
+  --text-faint: #64748b;
+  --border: #1e293b;
+  --border-strong: #334155;
+  --accent: #38bdf8;
+  --accent-hover: #7dd3fc;
+  --accent-soft: rgba(56, 189, 248, 0.12);
+  --accent-border: rgba(56, 189, 248, 0.32);
+  --code-bg: #0a0f1a;
+  --code-header-bg: #0f1726;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 12px 32px -6px rgba(0, 0, 0, 0.55);
+  --shadow-pop: 0 24px 52px -6px rgba(0, 0, 0, 0.72);
+
+  /* Syntax Highlighting Tokens (Dark Mode — VS Code / GitHub Dark Inspired) */
+  --tok-kw: #ff7b72;
+  --tok-str: #a5d6ff;
+  --tok-cmt: #6e7681;
+  --tok-fn: #d2a8ff;
+  --tok-num: #79c0ff;
+  --tok-flag: #ffa657;
+  --tok-cmd: #38bdf8;
+  --tok-prop: #7ee787;
+  --tok-var: #ffa657;
+  --tok-url: #58a6ff;
+  --tok-builtin: #d2a8ff;
+  --tok-prompt: #34d399;
+  --tok-op: #ff7b72;
+
+  /* Callout Semantic Tokens (Dark Mode) */
+  --callout-note-bg: rgba(56, 189, 248, 0.08);
+  --callout-note-border: rgba(56, 189, 248, 0.28);
+  --callout-note-fg: #38bdf8;
+
+  --callout-tip-bg: rgba(52, 211, 153, 0.08);
+  --callout-tip-border: rgba(52, 211, 153, 0.28);
+  --callout-tip-fg: #34d399;
+
+  --callout-important-bg: rgba(167, 139, 250, 0.09);
+  --callout-important-border: rgba(167, 139, 250, 0.3);
+  --callout-important-fg: #a78bfa;
+
+  --callout-warning-bg: rgba(251, 191, 36, 0.09);
+  --callout-warning-border: rgba(251, 191, 36, 0.3);
+  --callout-warning-fg: #fbbf24;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  scroll-padding-top: 86px;
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: var(--bg);
+  color: var(--text-body);
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  min-height: 100vh;
+}

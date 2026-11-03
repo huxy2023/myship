@@ -370,6 +370,104 @@ test('5. Lifecycle cleanup (rm & gc --older-than) and Console HTTP API', async (
       assert.equal(purgeJson.ok, true);
       assert.deepEqual(purgeJson.result.removedManifests, [dplOld.deploymentId]);
       assert.equal(existsSync(join(storageDir, 'envs', 'old-proj.json')), false);
+
+      // Phase 4 & 5 Console APIs: batch env set (including rawContent with inline comments & escapes),
+      // cross-project isolation, resources inspection, presigned file URL, and logs
+      mkdirSync(join(tmpRoot, '.myship'), { recursive: true });
+      writeFileSync(
+        join(tmpRoot, '.myship', 'project.json'),
+        JSON.stringify(
+          {
+            project: 'alpha',
+            dir: './custom-out',
+            backend: {
+              enabled: true,
+              provider: 'scf',
+              region: 'ap-shanghai',
+              entry: 'server/index.mjs',
+              functionName: 'custom-alpha-fn',
+            },
+            resources: {
+              db: { provider: 'turso', databaseName: 'alpha-db' },
+            },
+          },
+          null,
+          2
+        )
+      );
+
+      // CLI --project override must preserve current project's custom dir, backend, and resources
+      const cliOverrideCtx = detectProjectContext(tmpRoot, 'beta-release');
+      assert.equal(cliOverrideCtx.project, 'beta-release');
+      assert.equal(cliOverrideCtx.buildDir, './custom-out');
+      assert.equal(cliOverrideCtx.backend?.entry, 'server/index.mjs');
+      assert.equal(cliOverrideCtx.resources?.db?.provider, 'turso');
+
+      // Cross-project Console query for 'beta' must NOT inherit 'alpha' cwd config
+      const betaLogsRes = await fetch(`${url}/api/console/logs?project=beta&limit=5`);
+      const betaLogsJson = await betaLogsRes.json();
+      assert.equal(betaLogsJson.ok, true);
+      assert.equal(betaLogsJson.functionName, 'myship-beta');
+      assert.notEqual(betaLogsJson.region, 'ap-shanghai');
+
+      // Same-project query for 'alpha' DOES use 'alpha' cwd config when no manifest overrides it
+      const alphaLogsRes = await fetch(`${url}/api/console/logs?project=alpha&limit=5`);
+      const alphaLogsJson = await alphaLogsRes.json();
+      assert.equal(alphaLogsJson.ok, true);
+      assert.equal(alphaLogsJson.functionName, 'custom-alpha-fn');
+      assert.equal(alphaLogsJson.region, 'ap-shanghai');
+
+      const betaResInspect = await fetch(`${url}/api/console/resources?project=beta`);
+      const betaResInspectJson = await betaResInspect.json();
+      assert.equal(betaResInspectJson.ok, true);
+      assert.equal(betaResInspectJson.db.enabled, false);
+      assert.equal(betaResInspectJson.db.provider, 'sqlite-local');
+
+      const batchEnvRes = await fetch(`${url}/api/console/env`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-MyShip-Console': '1',
+        },
+        body: JSON.stringify({
+          project: 'app',
+          action: 'set-batch',
+          rawContent: [
+            '# Full-line comment',
+            'API_TOKEN=abc # production key',
+            'MULTI_LINE="line1\\nline2"',
+            'MYSHIP_DB_PROVIDER=turso',
+            'TURSO_DATABASE_URL=libsql://app-test.turso.io',
+          ].join('\n'),
+        }),
+      });
+      const batchEnvJson = await batchEnvRes.json();
+      assert.equal(batchEnvJson.ok, true);
+      assert.equal(batchEnvJson.count, 4);
+
+      const envCheckRes = await fetch(`${url}/api/console/env?project=app&reveal=1`);
+      const envCheckJson = await envCheckRes.json();
+      assert.equal(envCheckJson.ok, true);
+      assert.equal(envCheckJson.vars.API_TOKEN, 'abc');
+      assert.equal(envCheckJson.vars.MULTI_LINE, 'line1\nline2');
+
+      const resInspect = await fetch(`${url}/api/console/resources?project=app`);
+      const resInspectJson = await resInspect.json();
+      assert.equal(resInspectJson.ok, true);
+      assert.equal(resInspectJson.db.provider, 'turso');
+      assert.equal(resInspectJson.storage.filesPrefix, 'files/app/');
+
+      const presignRes = await fetch(
+        `${url}/api/console/file-presign?project=app&key=demo/hello.txt`
+      );
+      const presignJson = await presignRes.json();
+      assert.equal(presignJson.ok, true);
+      assert.match(presignJson.url, /\/_myship_files\/app\/demo\/hello\.txt\?method=GET/);
+
+      const logsRes = await fetch(`${url}/api/console/logs?project=app&limit=10`);
+      const logsJson = await logsRes.json();
+      assert.equal(logsJson.ok, true);
+      assert(Array.isArray(logsJson.logs));
     } finally {
       server.close();
     }
@@ -387,6 +485,7 @@ test('6. Fail-closed cloud abort before delete & live frontend runGc request pay
     gcOlderThanSelect: { value: '30d', style: {} },
     gcKeepInput: { value: '10', disabled: false, style: {}, title: '' },
     gcResultBox: { textContent: '', innerHTML: '' },
+    backendStatusSummary: { innerHTML: '', textContent: '' },
     toast: { textContent: '', style: {} },
   };
   let capturedGcPayload = null;
@@ -436,6 +535,41 @@ test('6. Fail-closed cloud abort before delete & live frontend runGc request pay
     olderThan: '30d',
     dryRun: true,
   });
+
+  // Verify renderBackendOverviewCard distinguishes live rolled-back deployment from latest deployment and shows actual runtime
+  sandbox.renderBackendOverviewCard({
+    name: 'app',
+    aliases: [{ subdomain: 'app', deploymentId: 'dpl_v1' }],
+    manifests: [
+      {
+        id: 'dpl_v2',
+        backend: {
+          mode: 'scf-web',
+          functionName: 'myship-app',
+          version: '2',
+          region: 'ap-guangzhou',
+          prefix: '/api',
+          runtime: 'Nodejs18.15',
+        },
+      },
+      {
+        id: 'dpl_v1',
+        backend: {
+          mode: 'scf-web',
+          functionName: 'myship-app',
+          version: '1',
+          region: 'ap-guangzhou',
+          prefix: '/api',
+          runtime: 'Nodejs18.15',
+        },
+      },
+    ],
+  });
+  assert.match(elements.backendStatusSummary.innerHTML, /Version 1 \(dpl_v1\)/);
+  assert.match(elements.backendStatusSummary.innerHTML, /Version 2 \(dpl_v2\)/);
+  assert.match(elements.backendStatusSummary.innerHTML, /已回滚偏离/);
+  assert.match(elements.backendStatusSummary.innerHTML, /Nodejs18\.15/);
+  assert.doesNotMatch(elements.backendStatusSummary.innerHTML, /Nodejs20\.19/);
 
   const writeRequests = [];
   let responseMode = 'incomplete';
