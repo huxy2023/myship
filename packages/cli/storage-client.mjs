@@ -206,12 +206,13 @@ export function createLocalFileStorage(cwd = process.cwd(), project = 'default',
       walk(baseDir, '');
       return all.sort();
     },
-    async presignUrl(key, { method = 'GET', expiresSec = 900, expiresIn = 900 } = {}) {
+    async presignUrl(key, { method = 'GET', expiresSec, expiresIn } = {}) {
       const safe = sanitizeFileKey(key);
       const baseOrigin = (
         env?.MYSHIP_DEV_ORIGIN || `http://127.0.0.1:${env?.PORT || 4321}`
       ).replace(/\/$/, '');
-      const exp = Math.floor(Date.now() / 1000) + Number(expiresSec || expiresIn || 900);
+      const ttlSec = Number(expiresSec ?? expiresIn ?? 900) || 900;
+      const exp = Math.floor(Date.now() / 1000) + ttlSec;
       return `${baseOrigin}/_myship_files/${encodeURIComponent(cleanProj)}/${safe}?method=${encodeURIComponent(
         String(method).toUpperCase()
       )}&expires=${exp}`;
@@ -427,10 +428,11 @@ export function createCloudStorage(project = 'default', env = process.env) {
       }
       return out.sort();
     },
-    async presignUrl(key, { method = 'GET', expiresSec = 900, expiresIn = 900 } = {}) {
+    async presignUrl(key, { method = 'GET', expiresSec, expiresIn } = {}) {
       const safe = sanitizeFileKey(key);
       const objKey = `${filesPrefixBase}${safe}`;
-      const { url, authQuery } = signCos(method, objKey, expiresSec || expiresIn || 900);
+      const ttlSec = Number(expiresSec ?? expiresIn ?? 900) || 900;
+      const { url, authQuery } = signCos(method, objKey, ttlSec);
       const tokenPart = sessionToken ? `&x-cos-security-token=${encodeURIComponent(sessionToken)}` : '';
       return `${url}${url.includes('?') ? '&' : '?'}${authQuery}${tokenPart}`;
     },

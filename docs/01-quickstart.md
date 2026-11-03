@@ -1,6 +1,6 @@
 # 5 分钟快速上手与 CLI 命令全解 (Quickstart & CLI Reference)
 
-**MyShip** 是面向个人与独立开发者的 **BYOC（Bring Your Own Cloud，自带云设施）** 全栈部署与资源编排引擎。它将 `surge.sh` 的零配置直觉体验与 `Vercel` 的不可变多版本预览、项目命名空间隔离、全栈 Serverless 后端、声明式云资源（数据库与文件存储）及 0 秒原子回滚融为一体。
+**MyShip** 是面向个人与独立开发者的 **BYOC（Bring Your Own Cloud，自带云设施）** 全栈部署与资源编排引擎。它将零参数 CLI 极简发布、SHA-256 不可变多版本预览、项目命名空间隔离、全栈 Serverless 后端、声明式云资源（数据库与文件存储）及 0 秒原子回滚融为一体。
 
 ---
 

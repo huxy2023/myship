@@ -17,7 +17,12 @@ async function ensureNotesTable(db) {
   const provider = String(db.provider || 'sqlite').toLowerCase();
   if (schemaInitializedForProvider === provider) return provider;
 
-  if (provider === 'pg' || provider === 'neon' || provider === 'postgres') {
+  if (
+    provider === 'pg' ||
+    provider === 'cloudbase-pg' ||
+    provider === 'neon' ||
+    provider === 'postgres'
+  ) {
     await db.execute(`
       CREATE TABLE IF NOT EXISTS starter_notes (
         id SERIAL PRIMARY KEY,
@@ -97,7 +102,11 @@ export async function fetch(request, context) {
   // 3. GET / POST / DELETE /api/notes — context.db (多引擎 SQL 读写)
   if (path === '/api/notes') {
     const provider = await ensureNotesTable(context.db);
-    const isPg = provider === 'pg' || provider === 'neon' || provider === 'postgres';
+    const isPg =
+      provider === 'pg' ||
+      provider === 'cloudbase-pg' ||
+      provider === 'neon' ||
+      provider === 'postgres';
 
     if (method === 'GET') {
       const { rows } = await context.db.query(

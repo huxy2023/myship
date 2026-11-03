@@ -1,9 +1,9 @@
 {
   "name": "@myship/cli",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "license": "MIT",
   "type": "module",
-  "description": "Self-hosted BYOC full-stack & CAS deployment engine (Vercel + surge.sh on your own Tencent Cloud EdgeOne, COS & SCF)",
+  "description": "Self-hosted BYOC full-stack & CAS deployment engine on your own Tencent Cloud EdgeOne, COS, SCF & Serverless Databases",
   "keywords": [
     "deployment",
     "cli",
@@ -11,8 +11,8 @@
     "tencent-cloud",
     "cos",
     "cas",
-    "vercel",
-    "surge",
+    "fullstack",
+    "deployment-engine",
     "static-site",
     "serverless",
     "byoc"
@@ -33,6 +33,7 @@
     "packages/edge-gateway/edgeone-function.template.js",
     "packages/edge-gateway/edgeone-api-worker.template.js",
     "packages/edge-gateway/local-gateway.mjs",
+    "skills/myship-skill/**",
     "README.md",
     "LICENSE"
   ],

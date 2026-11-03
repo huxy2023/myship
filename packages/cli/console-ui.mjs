@@ -8,6 +8,7 @@
  */
 import { CONSOLE_STYLES } from './console-styles.mjs';
 import { buildConsoleClientScript } from './console-client.mjs';
+import { LOGO_SVG, FAVICON_SVG } from './brand.mjs';
 
 export function renderConsoleHtml({
   modeLabel = '腾讯云 COS + EdgeOne',
@@ -22,13 +23,14 @@ export function renderConsoleHtml({
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>MyShip Console — 全栈可视化部署、切流与云资源管控台</title>
+  <title>MyShip Console — 自有云海，一令启航 | 全栈可视化部署、切流与云资源管控台</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,${encodeURIComponent(FAVICON_SVG)}" />
   <style>${CONSOLE_STYLES}</style>
 </head>
 <body>
   <header class="top-header">
-    <div class="brand">
-      <span class="brand-logo">⚡</span>
+    <div class="brand" title="MyShip — 自有云海，一令启航 (Your Cloud. Your Fleet. One Command to Ship.)">
+      <img class="brand-logo" src="data:image/svg+xml,${encodeURIComponent(LOGO_SVG)}" alt="" width="32" height="32" />
       <span>MyShip Console</span>
       <span class="badge" id="modeBadge">${safeMode}</span>
       <span class="badge success" id="domainBadge">加载中...</span>

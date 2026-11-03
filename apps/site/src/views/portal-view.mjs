@@ -10,11 +10,11 @@ export function renderPortalView() {
       <div class="hero-grid">
         <div>
           <div class="eyebrow">
-            <span>⚡ BYOC 自有云设施 · EdgeOne 泛域名网关 + COS 内容寻址 + 声明式全栈编排</span>
+            <span>⚓ 自有云海，一令启航 · Your Cloud. Your Fleet. One Command to Ship.</span>
           </div>
           <h1 class="hero-title">
-            用你自己的云设施，<br/>
-            <span>10 分钟搭一套私人 Vercel + Surge。</span>
+            自有云海，一令启航。<br/>
+            <span>10 分钟搭一套私人全栈云平台。</span>
           </h1>
           <p class="hero-desc">
             <strong>MyShip</strong> 是开源 BYOC 全栈部署与资源编排引擎。通过 <code>.myship/project.json</code> 自动隔离多项目命名空间，支持 SHA-256 块级去重、边缘与 SCF 双引擎后端、<code>myship use</code> 一键接入五大数据库及 0 秒原子回滚。
@@ -89,7 +89,7 @@ export function renderPortalView() {
       <!-- Bento Grid 全栈架构画廊 -->
       <div class="section-head">
         <h2>🏗️ 核心工程支柱 (Architecture Bento Grid)</h2>
-        <p>为什么一套运行在你自己腾讯云账号下的轻量化工具，能同时提供 Vercel 的不可变预览体验与全栈编排能力？</p>
+        <p>为什么一套运行在你自己腾讯云账号下的轻量化工具，能同时实现不可变多版本预览、0 秒原子回滚与全栈资源编排？</p>
       </div>
 
       <div class="bento-grid">
@@ -151,6 +151,29 @@ export function renderPortalView() {
           </div>
           <div class="bento-visual">
             <code><span class="tok-kw">const</span> { rows } = <span class="tok-kw">await</span> context.db.<span class="tok-fn">query</span>(<span class="tok-str">'SELECT * FROM guestbook LIMIT 20'</span>); <span class="tok-cmt">// 本地 SQLite ↔ 云端 Turso/Neon/PG 同构运行</span></code>
+          </div>
+        </div>
+
+        <div class="bento-card bento-span-2">
+          <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-start;gap:12px;">
+            <div style="flex:1;min-width:260px;">
+              <span class="bento-badge">PILLAR 05 · AI VIBECODING SKILL (myship-skill)</span>
+              <h3>内置 AI 编程代理专属技能包：<code>myship skill install -g</code></h3>
+              <p>
+                面向 Google Antigravity、Claude Code、Cursor 等 AI 编程代理，随 CLI 内置渐进式披露 <code>SKILL.md</code> 与全栈参考手册（涵盖 <code>context.db</code> 跨引擎 SQL 占位符、<code>context.files.presignUrl</code> 预签名直传红线与 SCF 不可变快照规范），让 AI 在任意工程中零失误一次跑通全栈开发与上线。
+              </p>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <a href="/skill/SKILL.md" target="_blank" class="btn-secondary" style="padding:7px 13px;font-size:0.8rem;text-decoration:none;">
+                <span>📄 查看 SKILL.md ↗</span>
+              </a>
+              <a href="/llms.txt" target="_blank" class="btn-secondary" style="padding:7px 13px;font-size:0.8rem;text-decoration:none;">
+                <span>🤖 查看 llms.txt ↗</span>
+              </a>
+            </div>
+          </div>
+          <div class="bento-visual">
+            <code><span class="tok-prompt">$</span> myship skill install -g <span class="tok-cmt"># 一键注入 ~/.gemini/config/skills/myship-skill &amp; ~/.agents/skills/myship-skill</span></code>
           </div>
         </div>
       </div>
@@ -299,6 +322,15 @@ export function renderPortalView() {
           <span style="font-size:0.8rem;font-weight:600;color:var(--accent);">阅读章节 →</span>
         </div>
       </div>
+
+      <section class="bento-card brand-story" aria-labelledby="mascot-title">
+        <div>
+          <span class="bento-badge">MEET SKIPPER</span>
+          <h3 id="mascot-title">戴上纸船帽，一起出发。</h3>
+          <p>这是 MyShip 的小海豹 Skipper。奶油色的身体、一顶小小的珊瑚橘纸船帽，陪你把做好的作品带到自己的云上。</p>
+        </div>
+        <img src="/mascot-skipper.png" alt="Skipper：戴着珊瑚橘纸船帽、微笑的小海豹" width="260" height="260" loading="lazy" />
+      </section>
     </div>
   </main>`;
 }

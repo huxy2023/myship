@@ -96,16 +96,11 @@ export const CONSOLE_STYLES = `
     letter-spacing: -0.01em;
   }
   .brand-logo {
-    width: 28px;
-    height: 28px;
+    width: 32px;
+    height: 32px;
     border-radius: 8px;
-    background: linear-gradient(135deg, #0284c7 0%, #3b82f6 55%, #6366f1 100%);
-    color: #fff;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 14px;
-    box-shadow: 0 2px 8px rgba(2, 132, 199, 0.35);
+    display: block;
+    flex-shrink: 0;
   }
   .badge {
     display: inline-flex;

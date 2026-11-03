@@ -62,6 +62,12 @@ import {
   fetchAndPrintScfLogs,
 } from './scf-client.mjs';
 import { runUseCommand } from './resource-manager.mjs';
+import {
+  runSkillCommand,
+  installMyShipSkill,
+  getMyShipSkillStatus,
+  BUILTIN_SKILL_SOURCE_DIR,
+} from './skill-installer.mjs';
 
 export * from './project-context.mjs';
 export * from './env-manager.mjs';
@@ -69,6 +75,7 @@ export * from './serverless.mjs';
 export * from './scf-bundler.mjs';
 export * from './scf-client.mjs';
 export * from './resource-manager.mjs';
+export * from './skill-installer.mjs';
 export * from './core-cas.mjs';
 export * from './lifecycle.mjs';
 export * from './dev-server.mjs';
@@ -241,7 +248,8 @@ function printWhoami() {
 
 function printHelp() {
   console.log(`
-🚀 MyShip CLI — 基于自有云设施 (BYOC) 的高 DX 全栈部署与泛域名路由工具
+⚓ MyShip CLI — 自有云海，一令启航 (Your Cloud. Your Fleet. One Command to Ship.)
+   基于自有云设施 (BYOC) 的高 DX 全栈部署、泛域名路由与声明式云资源编排工具
 
 极简日常用法 (自动关联 .myship/project.json 项目命名空间):
   myship                                       零参数部署：自动发布前端与后端新版本并更新 <project>.ship.<domain>
@@ -276,6 +284,7 @@ function printHelp() {
   myship login                                 交互式配置腾讯云密钥、COS 地址与泛域名后缀 (~/.myship/config.json)
   myship build-edge-fn [输出路径]              根据当前 COS 配置一键生成专属 EdgeOne 边缘函数代码 (.myship/edgeone-function.dist.js)
   myship whoami                                查看当前生效的认证状态、项目命名空间与 SCF 后端开关配置
+  myship skill [install|status] [--global|-g]  一键安装 MyShip AI Vibecoding 专属技能包 (SKILL.md) 至当前工程或本机全局 Agent 目录
 `);
 }
 
@@ -301,6 +310,8 @@ if (isMainModule) {
   const isForce = rawArgs.includes('--force') || rawArgs.includes('-f');
   const isScfFlag = rawArgs.includes('--scf') || rawArgs.includes('--backend');
   const isErrorsOnly = rawArgs.includes('--error') || rawArgs.includes('--errors');
+  const isGlobalSkill = rawArgs.includes('--global') || rawArgs.includes('-g');
+  const isClaudeSkill = rawArgs.includes('--claude');
 
   const domains = [];
   const aliasTargets = [];
@@ -372,6 +383,9 @@ if (isMainModule) {
         '--backend',
         '--error',
         '--errors',
+        '--global',
+        '-g',
+        '--claude',
       ].includes(arg)
     ) {
       // flag handled
@@ -406,6 +420,14 @@ if (isMainModule) {
     }
     if (first === 'whoami') {
       printWhoami();
+      return;
+    }
+    if (first === 'skill' || first === 'skills') {
+      runSkillCommand(positional[1] || 'install', {
+        cwd: process.cwd(),
+        global: isGlobalSkill,
+        claude: isClaudeSkill,
+      });
       return;
     }
     if (first === 'build-edge-fn' || first === 'setup-edge') {
@@ -620,7 +642,7 @@ if (isMainModule) {
     if (first === 'dev') {
       const ctx = detectProjectContext(process.cwd(), explicitProject);
       const targetProj = explicitProject ? normalizeDomainToken(explicitProject) : ctx.project;
-      let staticDir = positional[1];
+      let staticDir = explicitDir || positional[1];
       if (!staticDir) {
         if (existsSync(resolve(process.cwd(), 'index.html'))) {
           staticDir = '.';
@@ -645,10 +667,10 @@ if (isMainModule) {
     // 默认行为：deploy
     let targetDir = null;
     if (first === 'deploy') {
-      targetDir = positional[1] || null;
+      targetDir = explicitDir || positional[1] || null;
       if (positional[2]) domains.push(positional[2]);
     } else {
-      targetDir = positional[0] || null;
+      targetDir = explicitDir || positional[0] || null;
       if (positional[1]) domains.push(positional[1]);
     }
 

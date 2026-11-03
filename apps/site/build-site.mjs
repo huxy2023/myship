@@ -9,17 +9,21 @@
  * - src/views/{portal-view,docs-view}.mjs : 门户视图 (Bento Grid + 0ms 指针沙盘) 与三栏文档阅读器视图
  * - src/client/app-client.js            : 客户端路由 (Hash/History 同步)、⌘K 键盘导航、Mermaid 画布与抽屉交互
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseMarkdownDocument } from './src/compiler/markdown-compiler.mjs';
 import { renderPortalView } from './src/views/portal-view.mjs';
 import { renderDocsView } from './src/views/docs-view.mjs';
+import { MASCOT_SVG, LOGO_SVG, FAVICON_SVG } from '../../packages/cli/brand.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = resolve(__dirname, '../..');
+const PUBLIC_DIR = resolve(__dirname, 'public');
+const SKILL_SRC_DIR = resolve(ROOT_DIR, 'skills/myship-skill');
 const DIST_DIR = resolve(__dirname, 'dist');
 const RAW_DIR = resolve(DIST_DIR, 'raw');
+const SKILL_DIST_DIR = resolve(DIST_DIR, 'skill');
 
 const DOC_SOURCES = [
   {
@@ -98,8 +102,22 @@ function generateSiteHtml(parsedDocs, searchEntries, mcpConfig) {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>MyShip — 基于自有云设施 (BYOC) 的高 DX 全栈部署与云资源编排引擎</title>
-  <meta name="description" content="融合 surge.sh 极简 CLI 与 Vercel 不可变多版本预览。基于自有 EdgeOne 泛域名边缘函数、腾讯云 COS 内容寻址存储 (CAS)、SCF 全栈后端与五大 Serverless 数据库，实现无限版本保留与 0 秒原子回滚。" />
+  <title>MyShip — 自有云海，一令启航 | 基于自有云设施 (BYOC) 的全栈部署与云资源编排引擎</title>
+  <meta name="description" content="MyShip（自有云海，一令启航 · Your Cloud. Your Fleet. One Command to Ship.）— 开源 BYOC 全栈部署与云资源编排引擎。基于自有 EdgeOne 泛域名边缘函数、腾讯云 COS 内容寻址存储 (CAS)、SCF 全栈后端与五大 Serverless 数据库，实现无限版本保留与 0 秒原子回滚。" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="MyShip — 自有云海，一令启航 (Your Cloud. Your Fleet. One Command to Ship.)" />
+  <meta property="og:description" content="用你自己的云设施，10 分钟搭一套私人全栈云平台。支持 SHA-256 块级去重、边缘与 SCF 双擎后端、五大 Serverless 数据库与 0 秒原子回滚。" />
+  <meta property="og:image" content="https://myship.ship.onehub.top/og-banner.png" />
+  <meta property="og:image:type" content="image/png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:alt" content="MyShip 与戴纸船帽的小海豹 Skipper" />
+  <meta name="twitter:image:alt" content="MyShip 与戴纸船帽的小海豹 Skipper" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="MyShip — 自有云海，一令启航" />
+  <meta name="twitter:image" content="https://myship.ship.onehub.top/og-banner.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" media="print" onload="this.media='all'" />
@@ -123,10 +141,8 @@ ${bundledCss}
   <header class="navbar">
     <div class="navbar-inner">
       <div style="display:flex;align-items:center;gap:20px;min-width:0;">
-        <a class="brand" href="#/portal" data-switch-view="portal">
-          <span class="brand-icon">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
-          </span>
+        <a class="brand" href="#/portal" data-switch-view="portal" title="MyShip — 自有云海，一令启航 (Your Cloud. Your Fleet. One Command to Ship.)">
+          <img class="brand-icon" src="/logo.svg" alt="" width="32" height="32" />
           <span>MyShip</span>
           <span class="brand-badge">v0.3 · BYOC</span>
         </a>
@@ -161,13 +177,19 @@ ${bundledCss}
 
   <footer class="site-footer">
     <div class="site-footer-inner">
-      <div>
-        <strong>MyShip</strong> — Open-Source BYOC Full-Stack Deployment &amp; Resource Orchestration Engine (MIT License)
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+        <img src="/logo.svg" alt="MyShip Logo" width="26" height="26" style="border-radius:6px;display:block;" />
+        <div>
+          <strong>MyShip</strong> · <span style="color:var(--accent);font-weight:600;">自有云海，一令启航。</span>
+          <span style="opacity:0.8;">(Your Cloud. Your Fleet. One Command to Ship. · MIT License)</span>
+        </div>
       </div>
-      <div style="display:flex;gap:16px;flex-wrap:wrap;">
+      <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center;">
         <a href="https://github.com/huxy2023/myship" target="_blank" rel="noopener" class="doc-link">GitHub</a>
         <a href="https://www.npmjs.com/package/@myship/cli" target="_blank" rel="noopener" class="doc-link">NPM (@myship/cli)</a>
         <a href="https://fullstack-starter.ship.onehub.top" target="_blank" rel="noopener" class="doc-link">Full-Stack Starter</a>
+        <a href="/skill/SKILL.md" target="_blank" class="doc-link">AI Skill (SKILL.md)</a>
+        <a href="/mascot-skipper.png" target="_blank" class="doc-link">吉祥物 Skipper</a>
         <a href="/llms.txt" target="_blank" class="doc-link">llms.txt</a>
         <a href="/llms-full.txt" target="_blank" class="doc-link">llms-full.txt</a>
       </div>
@@ -313,9 +335,57 @@ export async function onRequestPost(context) {
   writeFileSync(resolve(apiDir, 'inspect.js'), apiInspectSource, 'utf-8');
 }
 
+function renderBrandBanner() {
+  const mascotPng = readFileSync(resolve(PUBLIC_DIR, 'mascot-skipper.png')).toString('base64');
+  const mascot = `<image x="690" y="72" width="450" height="486" preserveAspectRatio="xMidYMid slice" clip-path="url(#mascot-clip)" href="data:image/png;base64,${mascotPng}"/>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="banner-title">
+  <title id="banner-title">MyShip — 自有云海，一令启航。</title>
+  <rect width="1200" height="630" fill="#FFF8EE"/>
+  <defs><clipPath id="mascot-clip"><rect x="690" y="72" width="450" height="486" rx="64"/></clipPath></defs>
+  <rect x="690" y="72" width="450" height="486" rx="64" fill="#203A50"/>
+  <g fill="#253F54" font-family="Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif">
+    <text x="72" y="122" font-size="46" font-weight="700" letter-spacing="-1.5">MyShip</text>
+    <text x="74" y="164" font-size="15" letter-spacing="3" fill="#62849C">OPEN SOURCE · YOUR CLOUD</text>
+    <text x="68" y="278" font-size="64" font-weight="600">自有云海，</text>
+    <text x="68" y="360" font-size="64" font-weight="600">一令启航。</text>
+    <text x="74" y="422" font-size="24" fill="#526D80">把作品部署到你自己的云上。</text>
+    <text x="74" y="486" font-size="19" fill="#526D80">Your Cloud. Your Fleet. One Command to Ship.</text>
+    <text x="74" y="558" font-size="17" fill="#62849C">myship.ship.onehub.top</text>
+  </g>
+  ${mascot}
+</svg>`;
+}
+
 function buildAll() {
   mkdirSync(DIST_DIR, { recursive: true });
   mkdirSync(RAW_DIR, { recursive: true });
+  mkdirSync(SKILL_DIST_DIR, { recursive: true });
+
+  mkdirSync(PUBLIC_DIR, { recursive: true });
+
+  // Export the same vector artwork used by the offline CLI console.
+  writeFileSync(resolve(PUBLIC_DIR, 'mascot-skipper.svg'), MASCOT_SVG + '\n');
+  writeFileSync(resolve(PUBLIC_DIR, 'logo.svg'), LOGO_SVG + '\n');
+  writeFileSync(resolve(PUBLIC_DIR, 'favicon.svg'), FAVICON_SVG + '\n');
+  writeFileSync(resolve(PUBLIC_DIR, 'og-banner.svg'), renderBrandBanner() + '\n');
+
+  if (existsSync(PUBLIC_DIR)) {
+    for (const file of readdirSync(PUBLIC_DIR)) {
+      copyFileSync(resolve(PUBLIC_DIR, file), resolve(DIST_DIR, file));
+    }
+  }
+
+  if (existsSync(SKILL_SRC_DIR)) {
+    copyFileSync(resolve(SKILL_SRC_DIR, 'SKILL.md'), resolve(SKILL_DIST_DIR, 'SKILL.md'));
+    const refSrcDir = resolve(SKILL_SRC_DIR, 'references');
+    const refDistDir = resolve(SKILL_DIST_DIR, 'references');
+    if (existsSync(refSrcDir)) {
+      mkdirSync(refDistDir, { recursive: true });
+      for (const refFile of readdirSync(refSrcDir)) {
+        copyFileSync(resolve(refSrcDir, refFile), resolve(refDistDir, refFile));
+      }
+    }
+  }
 
   const parsedDocs = [];
   const allSearchEntries = [];
@@ -355,15 +425,19 @@ function buildAll() {
 
   const llmsTxt = `# MyShip — 基于自有云设施 (BYOC) 的高 DX 全栈部署、泛域名路由与云资源编排引擎
 
-> MyShip 是融合 surge.sh（极简 CLI）与 Vercel（不可变多版本预览、项目级命名空间隔离、边缘与 SCF 全栈后端、声明式数据库与文件存储、0 秒原子回滚）的开源 BYOC 平台。基于腾讯云 EdgeOne 标准站点（泛域名 *.ship.example.com + 边缘函数）、COS 内容寻址存储（CAS）、SCF Web 函数与五大 Serverless 数据库（CloudBase PG / Neon / Turso / D1 / MySQL）构建。
+> MyShip 是面向独立开发者的开源 BYOC 全栈部署与云资源编排引擎，集零参数 CLI 极简发布、SHA-256 不可变多版本预览、项目级命名空间隔离、边缘与 SCF 全栈后端、声明式数据库与文件存储、0 秒原子回滚于一体。基于腾讯云 EdgeOne 标准站点（泛域名 *.ship.example.com + 边缘函数）、COS 内容寻址存储（CAS）、SCF Web 函数与五大 Serverless 数据库（CloudBase PG / Neon / Turso / D1 / MySQL）构建。
 
 ## 核心文档索引 (Documentation)
 
 ${parsedDocs.map((d) => `- [${d.title}](https://myship.ship.onehub.top${d.rawPath}): ${d.description}`).join('\n')}
+- [MyShip AI Vibecoding Skill (SKILL.md)](https://myship.ship.onehub.top/skill/SKILL.md): 面向 Antigravity / Claude Code / Cursor 的全栈开发技能指令与 6 大防踩坑铁律（本机可通过 \`myship skill install -g\` 一键安装）
+  - [Full-Stack Runtime Reference](https://myship.ship.onehub.top/skill/references/fullstack-runtime.md)
+  - [CLI Automation & Troubleshooting Runbook](https://myship.ship.onehub.top/skill/references/cli-and-ops.md)
 
 ## 快速命令速查 (Quick CLI Reference)
 
 - 全局安装: \`npm i -g @myship/cli\`
+- 一键安装 AI Vibecoding 技能包 (Antigravity / Claude Code / Workspace): \`myship skill install -g\` 或 \`myship skill install\`
 - 交互式登录与绑定自有云底座 (含 CAM 最小权限指引 / tccli 扫码 + 自动探测网关): \`myship login\`
 - 一键同步全局 EdgeOne 边缘函数代码 (~/.myship/edgeone-function.dist.js): \`myship setup-edge\`
 - 本地全栈即时开发服务器 (热重载静态页、api/*.js、SCF 后端与本地 node:sqlite): \`myship dev\`

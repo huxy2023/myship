@@ -34,6 +34,11 @@ import {
   startConsoleServer,
   runBackendCommand,
   bundleScfBackend,
+  installMyShipSkill,
+  getMyShipSkillStatus,
+  runSkillCommand,
+  createLocalFileStorage,
+  createCloudStorage,
 } from '../myship.mjs';
 import { renderConsoleHtml } from '../console-ui.mjs';
 import { handleEdgeRequest } from '../../edge-gateway/local-gateway.mjs';
@@ -62,6 +67,15 @@ test('1. Package & module integrity: npm pack includes all CLI modules and exclu
       `Published package files whitelist is missing module: ${modPath}`
     );
   }
+  assert(packedFiles.has('skills/myship-skill/SKILL.md'), 'Tarball must include SKILL.md');
+  assert(
+    packedFiles.has('skills/myship-skill/references/fullstack-runtime.md'),
+    'Tarball must include fullstack-runtime.md reference'
+  );
+  assert(
+    packedFiles.has('skills/myship-skill/references/cli-and-ops.md'),
+    'Tarball must include cli-and-ops.md reference'
+  );
   for (const p of packedFiles) {
     assert(
       !p.startsWith('packages/cli/test/'),
@@ -93,6 +107,21 @@ test('1. Package & module integrity: npm pack includes all CLI modules and exclu
     );
     assert.equal(verRes.status, 0, `Unpacked myship --version failed: ${verRes.stderr}`);
     assert.match(verRes.stdout, /^myship v\d+\.\d+\.\d+/);
+
+    // Verify CLI --dir flag overrides auto-detected ./dist in the isolated unpacked CLI copy
+    const fakeProj = join(packTmp, 'dir-flag-proj');
+    mkdirSync(join(fakeProj, 'dist'), { recursive: true });
+    mkdirSync(join(fakeProj, 'custom'), { recursive: true });
+    writeFileSync(join(fakeProj, 'dist/index.html'), 'FROM_DIST');
+    writeFileSync(join(fakeProj, 'custom/index.html'), 'FROM_CUSTOM');
+    const cliDirRes = spawnSync(
+      'node',
+      [join(packTmp, 'package/packages/cli/myship.mjs'), '--dir', './custom', '--local'],
+      { cwd: fakeProj, encoding: 'utf8' }
+    );
+    assert.equal(cliDirRes.status, 0, `--dir deploy failed: ${cliDirRes.stderr}`);
+    const projJsonAfterDir = JSON.parse(readFileSync(join(fakeProj, '.myship/project.json'), 'utf8'));
+    assert.equal(projJsonAfterDir.dir, './custom');
   } finally {
     rmSync(packTmp, { recursive: true, force: true });
   }
@@ -848,4 +877,63 @@ export async function fetch(request, context) {
   const libRes = await staticDev(new Request('http://localhost:3000/lib/app.js'));
   assert.equal(libRes.status, 200);
   assert.equal(await libRes.text(), 'console.log("frontend lib");');
+
+  // Verify AI Vibecoding Skill installer (workspace & global)
+  const skillTmp = mkdtempSync(join(tmpdir(), 'myship-test-skill-'));
+  const fakeHome = join(skillTmp, 'home');
+  const fakeProj = join(skillTmp, 'proj');
+  mkdirSync(fakeHome, { recursive: true });
+  mkdirSync(fakeProj, { recursive: true });
+
+  const initialStatus = getMyShipSkillStatus({ cwd: fakeProj, homeDir: fakeHome });
+  assert.equal(initialStatus.workspace.installed, false);
+  assert.equal(initialStatus.globalAntigravity.installed, false);
+
+  const wsRes = runSkillCommand('install', { cwd: fakeProj, homeDir: fakeHome, global: false });
+  assert.equal(wsRes.scope, 'workspace');
+  assert(existsSync(join(fakeProj, '.agents/skills/myship-skill/SKILL.md')));
+  assert(existsSync(join(fakeProj, '.agents/skills/myship-skill/references/fullstack-runtime.md')));
+
+  const glRes = installMyShipSkill({
+    cwd: fakeProj,
+    homeDir: fakeHome,
+    global: true,
+    includeClaude: true,
+  });
+  assert.equal(glRes.scope, 'global');
+  assert(existsSync(join(fakeHome, '.gemini/config/skills/myship-skill/SKILL.md')));
+  assert(existsSync(join(fakeHome, '.agents/skills/myship-skill/SKILL.md')));
+  assert(existsSync(join(fakeHome, '.claude/skills/myship-skill/SKILL.md')));
+
+  const afterStatus = runSkillCommand('status', { cwd: fakeProj, homeDir: fakeHome });
+  assert.equal(afterStatus.workspace.installed, true);
+  assert.equal(afterStatus.globalAntigravity.installed, true);
+  assert.equal(afterStatus.globalUniversal.installed, true);
+  assert.equal(afterStatus.globalClaude.installed, true);
+
+  // Verify presignUrl expiresIn vs expiresSec & files.get Buffer return
+  const localFiles = createLocalFileStorage(fakeProj, 'skill-proj');
+  await localFiles.put('hello.txt', 'hello buffer', { contentType: 'text/plain' });
+  const gotBuf = await localFiles.get('hello.txt');
+  assert(Buffer.isBuffer(gotBuf), 'files.get must return a Buffer');
+  assert.equal(gotBuf.toString('utf8'), 'hello buffer');
+  assert.equal(gotBuf.contentType, 'text/plain');
+  assert.equal(gotBuf.size, 12);
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const localPresigned = new URL(await localFiles.presignUrl('hello.txt', { method: 'PUT', expiresIn: 600 }));
+  const expDiff = Number(localPresigned.searchParams.get('expires')) - nowSec;
+  assert(expDiff >= 595 && expDiff <= 605, `Expected expiresIn=600 TTL, got ${expDiff}s`);
+
+  const cloudFiles = createCloudStorage('skill-proj', {
+    MYSHIP_COS_ORIGIN: 'https://test-1250000000.cos.ap-guangzhou.myqcloud.com',
+    TENCENT_SECRET_ID: 'AKIDtest123',
+    TENCENT_SECRET_KEY: 'SKtest456',
+  }).files;
+  const cloudPresigned = new URL(await cloudFiles.presignUrl('hello.txt', { method: 'PUT', expiresIn: 600 }));
+  const [startStr, endStr] = cloudPresigned.searchParams.get('q-sign-time').split(';');
+  const cloudTtl = Number(endStr) - Number(startStr) - 60;
+  assert.equal(cloudTtl, 600, `Expected cloud presignUrl expiresIn=600, got ${cloudTtl}`);
+
+  rmSync(skillTmp, { recursive: true, force: true });
 });

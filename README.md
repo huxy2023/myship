@@ -1,15 +1,18 @@
-# ⚡ MyShip
+<div align="center">
+  <img src="./apps/site/public/og-banner.png" alt="MyShip — 自有云海，一令启航" width="100%" />
 
-**Build your own personal `surge.sh` + `Vercel` on Tencent Cloud EdgeOne, COS & Serverless Databases in 10 minutes.**
-**基于自有云设施（BYOC）的高 DX 内容寻址（CAS）全栈部署、泛域名路由与声明式云资源编排引擎。**
+  # ⚓ MyShip — 自有云海，一令启航。
 
-[![NPM Version](https://img.shields.io/npm/v/@myship/cli.svg?color=cb3837)](https://www.npmjs.com/package/@myship/cli)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
-[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20.0.0-339933.svg)](https://nodejs.org/)
-[![Live Docs](https://img.shields.io/badge/Website%20%26%20Docs-myship.ship.onehub.top-0284c7.svg)](https://myship.ship.onehub.top)
+  **Your Cloud. Your Fleet. One Command to Ship.**  
+  **基于自有云设施（BYOC）的高 DX 内容寻址（CAS）全栈部署、泛域名路由与声明式云资源编排引擎。**
 
-- 🌐 **官方在线门户与文档站 (由 MyShip 自举托管)**：[https://myship.ship.onehub.top](https://myship.ship.onehub.top)
-- 🤖 **AI / LLM 知识库索引 (`llms.txt`)**：[https://myship.ship.onehub.top/llms.txt](https://myship.ship.onehub.top/llms.txt) | [全量 Markdown (`llms-full.txt`)](https://myship.ship.onehub.top/llms-full.txt)
+  [![NPM Version](https://img.shields.io/npm/v/@myship/cli.svg?color=cb3837)](https://www.npmjs.com/package/@myship/cli)
+  [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+  [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20.0.0-339933.svg)](https://nodejs.org/)
+  [![Live Docs](https://img.shields.io/badge/Website%20%26%20Docs-myship.ship.onehub.top-0284c7.svg)](https://myship.ship.onehub.top)
+
+  🌐 **[官方在线门户与文档站](https://myship.ship.onehub.top)** · 🚀 **[全栈在线样板间](https://fullstack-starter.ship.onehub.top)** · 🤖 **[AI Skill (`SKILL.md`)](https://myship.ship.onehub.top/skill/SKILL.md)** · 📄 **[AI 知识库 (`llms.txt`)](https://myship.ship.onehub.top/llms.txt)**
+</div>
 
 ---
 
@@ -17,7 +20,7 @@
 
 国内主流静态与云托管平台通常将构建、路由与存储黑盒绑定，存在三个明显痛点：
 1. **历史版本数量受限**（例如仅保留最近 10 次部署，早期构建链接自动失效）。
-2. **子域名绑定死板**（通常只提供固定的生产/预览环境域名，无法像 `surge.sh` 或 `Vercel` 那样随手为任意一次本地构建指定 `https://app1-v2.ship.example.com`）。
+2. **子域名绑定死板**（通常只提供固定的生产/预览环境域名，无法随手为任意一次本地构建指定自定义预览子域名 `https://app1-v2.ship.example.com`）。
 3. **前后端版本割裂与建库繁琐**（回滚时前端退回旧版但后端云函数仍是新版；每开一个新项目都要去云控制台手动建数据库、配账号、拼连接串）。
 
 **MyShip** 采用 **BYOC（Bring Your Own Cloud，自带云设施）** 模式，只需利用你自己的 **1 个域名 + 腾讯云 EdgeOne 标准站点（免费版含泛域名与边缘函数）+ 腾讯云 COS 对象存储**（按需搭配 SCF Web 函数与 Serverless 数据库），即可获得：
@@ -46,7 +49,7 @@ cd myship
 pnpm demo
 pnpm test
 
-# 2. 编译生成 MyShip 产品门户与 Clarify 风格文档站 (输出至 apps/site/dist)
+# 2. 编译生成 MyShip 产品门户与技术文档站 (输出至 apps/site/dist)
 pnpm build:site
 ```
 
@@ -181,7 +184,7 @@ myship/
 │       └── local-gateway.mjs            # 本地 4100 端口泛域名模拟网关 (*.ship.localhost:4100)
 │
 ├── apps/
-│   └── site/                            # @myship/site — 产品门户与 Clarify 风格文档站构建器
+│   └── site/                            # @myship/site — 产品门户与技术文档站构建器
 │       └── build-site.mjs               # 读取 docs/*.md 一键生成门户、交互式 Mermaid 画布与 /llms.txt
 │
 ├── docs/                                # 统一文档中心 (Single Source of Truth)
@@ -203,6 +206,24 @@ myship/
 2. **[《从 0 到 1 自建云端底座保姆级指南 (BYOC Setup & Troubleshooting)》](./docs/02-self-hosting-guide.md)**
 3. **[《CAS 三级指针架构与全栈运行时原理》](./docs/03-architecture.md)**
 4. **[《产品愿景与极致 DX 演进蓝图》](./docs/04-roadmap.md)**
+
+---
+
+## 品牌与吉祥物：小海豹 Skipper
+
+<img src="./apps/site/public/mascot-skipper.png" alt="MyShip 吉祥物：戴纸船帽的小海豹 Skipper" width="180" align="right" />
+
+**自有云海，一令启航。**<br>
+*Your Cloud. Your Fleet. One Command to Ship.*
+
+Skipper 是一只戴着珊瑚橘纸船帽的小海豹。奶油色的身体、简单的微笑，陪你把做好的作品带到自己的云上。
+
+- **[Logo](./apps/site/public/logo.png)**：深墨蓝底海豹，用于项目头像；导航栏与控制台使用简化小图标。
+- **[Favicon](./apps/site/public/favicon.svg)**：简化的海豹头像，适配浏览器标签页。
+- **[吉祥物图片](./apps/site/public/mascot-skipper.png)**：保留柔和质感的完整角色，用于官网和介绍材料。
+- **[品牌素材使用说明](./docs/05-brand-assets.md)**：矢量源、分享图与导出方式。
+
+<br clear="both" />
 
 ---
 

@@ -42,13 +42,9 @@
 .brand-icon {
   width: 32px;
   height: 32px;
-  border-radius: 9px;
-  background: linear-gradient(135deg, #0284c7 0%, #3b82f6 55%, #6366f1 100%);
-  color: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  box-shadow: 0 2px 10px rgba(2, 132, 199, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+  border-radius: 8px;
+  display: block;
+  flex-shrink: 0;
 }
 
 .brand-badge {
@@ -1045,4 +1041,20 @@ html.dark .hero-title span {
   .feature-grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* The mascot remains a quiet companion to the product content. */
+.brand-story {
+  margin-top: 40px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 260px;
+  align-items: center;
+  gap: 32px;
+}
+.brand-story h3 { font-size: 1.5rem; margin: 12px 0; }
+.brand-story p { max-width: 48ch; color: var(--text-soft); line-height: 1.8; }
+.brand-story img { display: block; width: 100%; max-width: 260px; height: auto; border-radius: 28px; }
+@media (max-width: 680px) {
+  .brand-story { grid-template-columns: 1fr; gap: 12px; }
+  .brand-story img { width: 200px; justify-self: center; }
 }

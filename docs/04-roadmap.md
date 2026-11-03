@@ -80,5 +80,6 @@ flowchart LR
 - **交互式向导独立拆分 (`resource-wizards.mjs`)**：将 `packages/cli/resource-manager.mjs` 中的终端交互式引导流程（`runInteractiveUseWizard` / `runInteractiveDbWizard`）独立拆出，使单个模块文件严格控制在 800~900 行以内。
 - **云厂商管控面客户端正交化 (`teo-client.mjs` / `tcb-client.mjs`)**：将 `packages/cli/cos-client.mjs` 中混放的腾讯云 EdgeOne (`TEO`) 与 CloudBase (`TCB`) 管控面 API 剥离为独立模块，使 `cos-client.mjs` 100% 专注于对象存储数据面与 XML v5 签名。
 
-### 4. 🤖 AI Vibecoding 专属技能包封装 (`myship-skill`)
-- **高密度 Agent Skill (`SKILL.md`)**：面向 Antigravity、Claude Code、Cursor 等 AI 编程代理，封装标准化的 MyShip 全栈开发技能指令（涵盖 `myship use` 资源编排、`context.db` 各数据库 SQL 方言规范、`context.files` 预签名直传范式、`server/index.mjs` 打包契约与常见避坑守则），让 AI Agent 在任意用户项目中零失误一次跑通全栈开发与上线。
+### 4. 🤖 AI Vibecoding 专属技能包封装 (`myship-skill` · ✅ 已实现)
+- **高密度渐进式 Agent Skill (`skills/myship-skill/SKILL.md` + `references/`)**：面向 Google Antigravity、Claude Code、Cursor 等 AI 编程代理，封装标准化的 MyShip 全栈开发技能指令（涵盖架构选型决策树、`myship use` 资源编排、`context.db` 各数据库 SQL 方言规范、`context.files.presignUrl` 预签名直传范式、`server/index.mjs` 打包契约与 6 大避坑铁律）。
+- **CLI 一键分发与在线直链 (`myship skill`)**：支持执行 `myship skill install -g` 一键安装至本机全局 AI 代理目录（`~/.gemini/config/skills/`、`~/.agents/skills/`、`~/.claude/skills/`）或当前工程 `.agents/skills/myship-skill/`，同时在官网提供 `/skill/SKILL.md` 在线直链。
