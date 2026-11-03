@@ -3,6 +3,7 @@
  *
  * 模块职责划分：
  * - `./tui-prompts.mjs`: 交互式终端选择器 (`promptSelect`) 与文本问答 (`promptText`)
+ * - `./resource-wizards.mjs`: 交互式引导流程、云环境自动扫描菜单与终端状态渲染面板
  * - `./db-provisioners.mjs`: 多引擎数据库物理建库、建 Schema 与连接派生引擎
  * - `./resource-manager.mjs`: 项目资源环境变量解析 (`resolveProjectResourceEnv`) 与 `myship use` 命令编排 (`runUseCommand`)
  */
@@ -15,7 +16,6 @@ import {
   normalizeDomainToken,
 } from './project-context.mjs';
 import {
-  discoverCloudBasePgEnvs,
   getEffectiveEndpoints,
   getGlobalDbProvidersConfig,
   saveMyShipFileConfig,
@@ -42,6 +42,22 @@ import {
   provisionCloudflareD1Database,
   provisionNeonDatabase,
 } from './db-provisioners.mjs';
+import {
+  promptUseTargetWizard,
+  promptDbProviderWizard,
+  runInteractivePgSetupWizard,
+  runInteractiveMysqlSetupWizard,
+  runInteractiveTursoSetupWizard,
+  runInteractiveD1SetupWizard,
+  runInteractiveNeonSetupWizard,
+  printStorageBoundSummary,
+  printPgBoundSummary,
+  printMysqlBoundSummary,
+  printTursoBoundSummary,
+  printD1BoundSummary,
+  printNeonBoundSummary,
+  renderUseResourceStatusView,
+} from './resource-wizards.mjs';
 
 export {
   promptSelect,
@@ -304,32 +320,9 @@ export async function runUseCommand({
   );
 
   if (!target && !setDefaultArg) {
-    if (isInteractive) {
-      target = await promptSelect({
-        title: `请选择要为项目 [${project}] 接入或查看的云资源`,
-        items: [
-          {
-            label: '🗄️  接入数据库 (Database)',
-            hint: '[CloudBase PG / Neon / Turso / D1 / MySQL]',
-            value: 'db',
-          },
-          {
-            label: '📦 接入对象存储与文件上传 (Storage & Files)',
-            hint: '[自动注入 context.storage + context.files]',
-            value: 'storage',
-          },
-          {
-            label: '📊 查看当前项目资源状态 (Status)',
-            hint: '[查看已绑定资源与全局底座就绪状态]',
-            value: 'status',
-          },
-        ],
-        defaultIndex: 0,
-        promptAnswers,
-      });
-    } else {
-      target = 'status';
-    }
+    target = isInteractive
+      ? await promptUseTargetWizard({ project, promptAnswers })
+      : 'status';
   }
 
   if (setDefaultArg || target === 'default-db') {
@@ -416,25 +409,14 @@ export async function runUseCommand({
       storageDir,
     });
 
-    console.log('==============================================================');
-    console.log(`✅ 项目 [${project}] 对象存储资源已注册并注入！`);
-    console.log(`   📦 JSON KV 前缀 (context.storage): ${dataPrefix}`);
-    console.log(`   🗂️  文件存储前缀 (context.files):   ${filesPrefix}`);
-    console.log(`   🌍 环境模式:                        ${envName} (本地 dev 自动映射至 .myship/files/${project}/)`);
-    console.log(
-      `   🔐 隔离策略:                        ${isolation} (${
-        isolation === 'shared'
-          ? '复用全局 COS 凭证 + 路径前缀隔离'
-          : '路径前缀隔离 (STS 子密钥收紧策略预留，当前版本复用全局 COS 凭证)'
-      })`
-    );
-    console.log(`   📥 环境变量已同步至:                ${persistedTo}`);
-    console.log('--------------------------------------------------------------');
-    console.log('💡 在后端代码中直接使用：');
-    console.log("   await context.files.put('Uploads/hello.txt', 'Hello MyShip!', { contentType: 'text/plain' });");
-    console.log("   const buf = await context.files.get('Uploads/hello.txt');");
-    console.log("   const uploadUrl = await context.files.presignUrl('Uploads/avatar.png', { method: 'PUT' });");
-    console.log('==============================================================');
+    printStorageBoundSummary({
+      project,
+      dataPrefix,
+      filesPrefix,
+      envName,
+      isolation,
+      persistedTo,
+    });
     return { project, resource: 'storage', config: nextResources.storage };
   }
 
@@ -450,65 +432,10 @@ export async function runUseCommand({
     if (explicitProviderArg) {
       rawProvider = explicitProviderArg.toLowerCase();
     } else if (isInteractive) {
-      const defProv = (ctx.resources?.db?.provider || globalDb.defaultDbProvider || '').toLowerCase();
-      const providerMenu = [
-        {
-          label: '🐘 腾讯云 CloudBase PostgreSQL',
-          hint: globalDb.tcbEnvId
-            ? `[✅ 已绑定环境: ${globalDb.tcbEnvId}${defProv === 'pg' ? ' · ⭐ 默认' : ''}]`
-            : '[自动扫描云端环境，免记配置]',
-          value: 'cloudbase-pg',
-        },
-        {
-          label: '⚡ Neon Serverless PostgreSQL',
-          hint:
-            globalDb.neonApiKey || globalDb.neonMasterUrl
-              ? `[✅ 已配置全局凭证${defProv === 'neon' ? ' · ⭐ 默认' : ''}]`
-              : '[Serverless PG · 多 Schema 零成本隔离]',
-          value: 'neon',
-        },
-        {
-          label: '🚀 Turso (Edge SQLite)',
-          hint:
-            globalDb.tursoOrg && globalDb.tursoApiToken
-              ? `[✅ 已配置 org:${globalDb.tursoOrg}${defProv === 'turso' ? ' · ⭐ 默认' : ''}]`
-              : '[libSQL 边缘低延迟 SQLite]',
-          value: 'turso',
-        },
-        {
-          label: '☁️  Cloudflare D1',
-          hint:
-            globalDb.cfAccountId && globalDb.cfApiToken
-              ? `[✅ 已配置全局凭证${defProv === 'd1' ? ' · ⭐ 默认' : ''}]`
-              : '[Serverless SQLite]',
-          value: 'd1',
-        },
-        {
-          label: '🐬 原生 MySQL / 腾讯云 TDSQL-C',
-          hint: globalDb.mysqlMasterUrl
-            ? `[✅ 已配置主连接串${defProv === 'mysql' ? ' · ⭐ 默认' : ''}]`
-            : '[标准 mysql:// 协议自动分库]',
-          value: 'mysql',
-        },
-        {
-          label: '🐘 原生 PostgreSQL (标准连接串)',
-          hint: globalDb.pgMasterUrl
-            ? `[✅ 已配置主连接串${defProv === 'pg' && !globalDb.tcbEnvId ? ' · ⭐ 默认' : ''}]`
-            : '[标准 postgresql:// 协议自动分 Schema]',
-          value: 'pg',
-        },
-      ];
-      let defaultIdx = 0;
-      if (defProv === 'neon') defaultIdx = 1;
-      else if (defProv === 'turso') defaultIdx = 2;
-      else if (defProv === 'd1') defaultIdx = 3;
-      else if (defProv === 'mysql') defaultIdx = 4;
-      else if (defProv === 'pg' && globalDb.pgMasterUrl && !globalDb.tcbEnvId) defaultIdx = 5;
-
-      rawProvider = await promptSelect({
-        title: `请选择项目 [${project}] 要接入的数据库底座`,
-        items: providerMenu,
-        defaultIndex: defaultIdx,
+      rawProvider = await promptDbProviderWizard({
+        project,
+        ctx,
+        globalDb,
         promptAnswers,
       });
     } else {
@@ -537,146 +464,24 @@ export async function runUseCommand({
       let inputRegion = getOpt('--region');
       let isolateBy = (getOpt('--isolate') || 'schema').toLowerCase();
 
-      // 交互式自动扫描腾讯云 CloudBase PG 环境 (免记 EnvId / Region)
-      if (rawProvider === 'cloudbase-pg' && !inputEnvId) {
-        console.log('🔍 正在扫描当前腾讯云账号下的 CloudBase PostgreSQL 环境...');
-        let discoveredEnvs = [];
-        if (!isLocal || process.env.TCB_API_ENDPOINT) {
-          try {
-            discoveredEnvs = await discoverCloudBasePgEnvs();
-          } catch {
-            discoveredEnvs = [];
-          }
-        }
-
-        if (discoveredEnvs.length > 0 && isInteractive) {
-          const envItems = discoveredEnvs.map((env) => ({
-            label: `${env.envId}${env.alias && env.alias !== env.envId ? ` (${env.alias})` : ''}`,
-            hint: `[${env.region} · ${env.packageName || 'Serverless PG'} · 实例: ${env.instanceName}]`,
-            value: `${env.envId}:::${env.region}`,
-          }));
-          envItems.push({
-            label: '✍️  手动输入其他 CloudBase 环境 ID',
-            hint: '[输入自定义 EnvId]',
-            value: '__manual__',
-          });
-          const defaultEnvIdx = globalDb.tcbEnvId
-            ? Math.max(
-                0,
-                discoveredEnvs.findIndex((e) => e.envId === globalDb.tcbEnvId)
-              )
-            : 0;
-          const chosenEnv = await promptSelect({
-            title: '已自动发现以下腾讯云 CloudBase PG 环境，请选择',
-            items: envItems,
-            defaultIndex: defaultEnvIdx,
-            promptAnswers,
-          });
-          if (chosenEnv === '__manual__') {
-            inputEnvId = await promptText({
-              question: '请输入腾讯云 CloudBase 环境 ID (EnvId)',
-              defaultValue: globalDb.tcbEnvId || '',
-              promptAnswers,
-            });
-            inputRegion = await promptText({
-              question: '请输入所属地域 (Region)',
-              defaultValue: globalDb.tcbRegion || 'ap-shanghai',
-              promptAnswers,
-            });
-          } else {
-            const [pickedId, pickedRegion] = chosenEnv.split(':::');
-            inputEnvId = pickedId;
-            inputRegion = pickedRegion || 'ap-shanghai';
-          }
-        } else if (discoveredEnvs.length === 1 && !isInteractive) {
-          inputEnvId = discoveredEnvs[0].envId;
-          inputRegion = discoveredEnvs[0].region;
-        } else if (isInteractive && !globalDb.tcbEnvId && rawProvider === 'cloudbase-pg') {
-          inputEnvId = await promptText({
-            question: '请输入腾讯云 CloudBase 环境 ID (EnvId)',
-            defaultValue: '',
-            promptAnswers,
-          });
-          inputRegion = await promptText({
-            question: '请输入所属地域 (Region)',
-            defaultValue: 'ap-shanghai',
-            promptAnswers,
-          });
-        }
-
-        // 选择连接模式：黄金组合连接串模式 vs 极速零配置管控模式 vs 绑定现有 public 库
-        if (isInteractive && (inputEnvId || globalDb.tcbEnvId) && !inputUrl && !globalDb.pgMasterUrl) {
-          const modeChoice = await promptSelect({
-            title: '请选择 CloudBase PostgreSQL 接入模式',
-            items: [
-              {
-                label: '🔌 黄金组合模式 (推荐 · 标准连接池 / ORM)',
-                hint: '[ExecutePGSql 自动建 Schema + 注入 PGHOST/DATABASE_URL，支持 pg.Pool / Drizzle / Prisma]',
-                value: 'hybrid',
-              },
-              {
-                label: '⚡ 管控 API 直连模式 (免填连接串)',
-                hint: '[仅用 EnvId 自动建 Schema + 零依赖 context.db 直连，适合轻量/低频读写]',
-                value: 'api-only',
-              },
-              {
-                label: '🔗 直接绑定默认 public Schema (不新建 Schema)',
-                hint: '[使用现有 public Schema + 零依赖 context.db 直连]',
-                value: 'raw-public',
-              },
-            ],
-            defaultIndex: 0,
-            promptAnswers,
-          });
-          if (modeChoice === 'hybrid') {
-            inputUrl = await promptText({
-              question: '请粘贴 PostgreSQL 主连接串 (postgresql://user:pass@host:5432/postgres)',
-              defaultValue: '',
-              promptAnswers,
-            });
-          } else if (modeChoice === 'raw-public') {
-            isRawUrl = true;
-          }
-        }
-      } else if (
-        rawProvider === 'pg' &&
-        isInteractive &&
-        !inputUrl &&
-        !globalDb.pgMasterUrl
-      ) {
-        inputUrl = await promptText({
-          question: '请粘贴 PostgreSQL 连接串 (postgresql://user:pass@host:5432/postgres)',
-          defaultValue: '',
-          promptAnswers,
-        });
-        const isoChoice = await promptSelect({
-          title: '请选择项目库隔离策略',
-          items: [
-            {
-              label: `🏷️  按项目自动派生独立 Schema (myship_${sanitizePgSchemaIdent(project)})`,
-              hint: '[单实例零成本多项目隔离]',
-              value: 'schema',
-            },
-            {
-              label: `🗄️  按项目自动创建独立 Database (myship_${sanitizePgSchemaIdent(project)})`,
-              hint: '[物理库级隔离]',
-              value: 'db',
-            },
-            {
-              label: '🔗 原生直连现有库 (--raw)',
-              hint: '[不改写库名或 Schema，直接连接已有生产库]',
-              value: 'raw',
-            },
-          ],
-          defaultIndex: 0,
-          promptAnswers,
-        });
-        if (isoChoice === 'raw') {
-          isRawUrl = true;
-        } else {
-          isolateBy = isoChoice;
-        }
-      }
+      const pgWizardOut = await runInteractivePgSetupWizard({
+        project,
+        rawProvider,
+        inputUrl,
+        inputEnvId,
+        inputRegion,
+        isolateBy,
+        isRawUrl,
+        isLocal,
+        isInteractive,
+        globalDb,
+        promptAnswers,
+      });
+      inputUrl = pgWizardOut.inputUrl;
+      inputEnvId = pgWizardOut.inputEnvId;
+      inputRegion = pgWizardOut.inputRegion;
+      isolateBy = pgWizardOut.isolateBy;
+      isRawUrl = pgWizardOut.isRawUrl;
 
       if (
         (inputUrl && !isRawUrl && (isGlobalFlag || !globalDb.pgMasterUrl)) ||
@@ -694,7 +499,6 @@ export async function runUseCommand({
       maybeSaveDefaultProvider('pg');
 
       const masterUrl = inputUrl || globalDb.pgMasterUrl;
-      // 仅当显式指定 --env-id、或使用 cloudbase-pg、或未指定独立 --url 时才启用 CloudBase TCB_ENV_ID，防止全局 tcbEnvId 污染无关的原生 PG 连接串
       const shouldUseTcbEnv =
         Boolean(inputEnvId) ||
         rawProvider === 'cloudbase-pg' ||
@@ -783,34 +587,18 @@ export async function runUseCommand({
         storageDir,
       });
 
-      console.log('==============================================================');
-      console.log(`✅ 项目 [${project}] PostgreSQL (CloudBase PG / 原生 PG) 已注册并注入！`);
-      console.log(
-        `   🐘 数据库模式:   ${
-          isRawUrl
-            ? '原生直连 (--raw 自定义库)'
-            : isolateBy === 'db'
-            ? `独立数据库隔离 (${derived.dbName})`
-            : `单实例多 Schema 隔离 (${schema})`
-        }`
-      );
-      console.log(
-        `   🔨 物理建库状态: ${
-          provisionResult.status === 'created'
-            ? `✅ 已在远端物理创建 [${provisionResult.target}] (${provisionResult.method})`
-            : `⚪ ${provisionResult.method}`
-        }`
-      );
-      console.log(`   🌍 环境模式:     ${envName}`);
-      console.log(`   🔐 隔离策略:     ${isolation}`);
-      console.log(
-        `   📥 环境变量同步: ${persistedTo} (${Object.keys(envEntries).join(', ')})`
-      );
-      console.log('--------------------------------------------------------------');
-      console.log('💡 在后端代码中直接使用 (对齐腾讯云 CloudBase PG 官方 Node.js 规范)：');
-      console.log('   - 标准连接池: 使用 `new pg.Pool({ host: process.env.PGHOST, user: process.env.PGUSER, password: process.env.PGPASSWORD, database: process.env.PGDATABASE, ssl: { rejectUnauthorized: false }, max: 5 })`');
-      console.log('   - 标准 ORM:   使用 `drizzle-orm` / `prisma` 连接 `process.env.DATABASE_URL`');
-      console.log('==============================================================');
+      printPgBoundSummary({
+        project,
+        isRawUrl,
+        isolateBy,
+        dbName: derived.dbName,
+        schema,
+        provisionResult,
+        envName,
+        isolation,
+        persistedTo,
+        envEntries,
+      });
       return {
         project,
         resource: 'db',
@@ -830,31 +618,17 @@ export async function runUseCommand({
       rawProvider === 'tdsql-mysql'
     ) {
       let inputUrl = getOpt('--url');
-      if (isInteractive && !inputUrl && !globalDb.mysqlMasterUrl) {
-        inputUrl = await promptText({
-          question: '请粘贴 MySQL 连接串 (mysql://root:pass@host:3306/)',
-          defaultValue: '',
-          promptAnswers,
-        });
-        const mysqlIso = await promptSelect({
-          title: '请选择 MySQL 隔离模式',
-          items: [
-            {
-              label: `🗄️  按项目自动创建独立库 (myship_${sanitizePgSchemaIdent(project)})`,
-              hint: '[推荐 · 自动执行 CREATE DATABASE]',
-              value: 'isolated',
-            },
-            {
-              label: '🔗 原生直连现有库 (--raw)',
-              hint: '[不改写库名，直接连接已有生产库]',
-              value: 'raw',
-            },
-          ],
-          defaultIndex: 0,
-          promptAnswers,
-        });
-        if (mysqlIso === 'raw') isRawUrl = true;
-      }
+      const mysqlOut = await runInteractiveMysqlSetupWizard({
+        project,
+        inputUrl,
+        isRawUrl,
+        isInteractive,
+        globalDb,
+        promptAnswers,
+      });
+      inputUrl = mysqlOut.inputUrl;
+      isRawUrl = mysqlOut.isRawUrl;
+
       if (inputUrl && !isRawUrl && (isGlobalFlag || !globalDb.mysqlMasterUrl)) {
         saveMyShipFileConfig({ mysqlMasterUrl: inputUrl });
       }
@@ -916,25 +690,15 @@ export async function runUseCommand({
         storageDir,
       });
 
-      console.log('==============================================================');
-      console.log(`✅ 项目 [${project}] 原生 MySQL 数据库已注册并注入！`);
-      console.log(
-        `   🐬 数据库名称:   ${dbName} (${isRawUrl ? '原生直连 --raw' : '按项目自动派生隔离库名'})`
-      );
-      console.log(
-        `   🔨 物理建库状态: ${
-          provisionResult.status === 'created'
-            ? `✅ 已在远端物理创建数据库 [${dbName}] (${provisionResult.method})`
-            : `⚪ ${provisionResult.method}`
-        }`
-      );
-      console.log(`   🌍 环境模式:     ${envName}`);
-      console.log(`   🔐 隔离策略:     ${isolation}`);
-      console.log(`   📥 环境变量同步: ${persistedTo} (DATABASE_URL, MYSQL_URL, MYSQL_DATABASE)`);
-      console.log('--------------------------------------------------------------');
-      console.log('💡 在后端代码中直接使用：');
-      console.log('   - 标准生态: 使用 `mysql2/promise` / `drizzle-orm` / `prisma` 连接 `process.env.DATABASE_URL` (或 `MYSQL_URL`)');
-      console.log('==============================================================');
+      printMysqlBoundSummary({
+        project,
+        dbName,
+        isRawUrl,
+        provisionResult,
+        envName,
+        isolation,
+        persistedTo,
+      });
       return {
         project,
         resource: 'db',
@@ -953,43 +717,17 @@ export async function runUseCommand({
       const directDbUrl = getOpt('--url');
       const directDbToken = getOpt('--db-token');
 
-      if (isInteractive && !directDbUrl && !inputApiToken && !globalDb.tursoApiToken) {
-        inputApiToken = await promptText({
-          question: '请输入 Turso Platform API Token',
-          defaultValue: '',
-          promptAnswers,
-        });
-      }
-
-      const activeApiToken = inputApiToken || globalDb.tursoApiToken;
-      if (!directDbUrl && !inputOrg && !globalDb.tursoOrg && activeApiToken) {
-        const orgs = await discoverTursoOrganizations({ apiToken: activeApiToken });
-        if (orgs.length === 1) {
-          inputOrg = orgs[0].slug;
-          console.log(`✅ 已通过 API Token 自动识别 Turso 组织: ${inputOrg}`);
-        } else if (orgs.length > 1) {
-          if (isInteractive) {
-            inputOrg = await promptSelect({
-              title: '🏢 检测到多个 Turso 组织，请选择目标组织：',
-              items: orgs.map((o) => ({
-                label: `${o.slug} (${o.name})`,
-                hint: `[${o.type}]`,
-                value: o.slug,
-              })),
-              defaultIndex: 0,
-              promptAnswers,
-            });
-          } else {
-            inputOrg = orgs[0].slug;
-          }
-        } else if (isInteractive) {
-          inputOrg = await promptText({
-            question: '请输入 Turso 组织名 (Organization Slug)',
-            defaultValue: '',
-            promptAnswers,
-          });
-        }
-      }
+      const tursoOut = await runInteractiveTursoSetupWizard({
+        inputOrg,
+        inputApiToken,
+        directDbUrl,
+        isInteractive,
+        globalDb,
+        promptAnswers,
+      });
+      inputOrg = tursoOut.inputOrg;
+      inputApiToken = tursoOut.inputApiToken;
+      const activeApiToken = tursoOut.activeApiToken;
 
       if (inputOrg || inputApiToken || inputGroup) {
         saveMyShipFileConfig({
@@ -1065,19 +803,15 @@ export async function runUseCommand({
         storageDir,
       });
 
-      console.log('==============================================================');
-      console.log(`✅ 项目 [${project}] Turso (Edge SQLite) 数据库已${action === 'created' ? '自动创建' : '绑定'}并注入！`);
-      console.log(`   ⚡ 数据库名称:   ${dbName}`);
-      console.log(`   🔗 连接地址:     ${databaseUrl}`);
-      console.log(`   🌍 环境模式:     ${envName} (本地 dev 自动映射至 .myship/data/${project}/local.sqlite)`);
-      console.log(`   🔐 隔离策略:     ${isolation}`);
-      console.log(`   📥 环境变量同步: ${persistedTo} (TURSO_DATABASE_URL, TURSO_AUTH_TOKEN)`);
-      console.log('--------------------------------------------------------------');
-      console.log('💡 在后端代码中零依赖直接使用：');
-      console.log("   await context.db.execute('CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, text TEXT)');");
-      console.log("   await context.db.execute('INSERT INTO notes (text) VALUES (?)', ['Hello Turso']);");
-      console.log("   const rows = await context.db.query('SELECT * FROM notes');");
-      console.log('==============================================================');
+      printTursoBoundSummary({
+        project,
+        action,
+        dbName,
+        databaseUrl,
+        envName,
+        isolation,
+        persistedTo,
+      });
       return { project, resource: 'db', provider: 'turso', dbName, databaseUrl, action };
     }
 
@@ -1087,24 +821,15 @@ export async function runUseCommand({
       let inputApiToken = getOpt('--token');
       const explicitDbId = getOpt('--db-id');
 
-      if (
-        isInteractive &&
-        !inputAccountId &&
-        !globalDb.cfAccountId &&
-        !inputApiToken &&
-        !globalDb.cfApiToken
-      ) {
-        inputAccountId = await promptText({
-          question: '请输入 Cloudflare Account ID',
-          defaultValue: '',
-          promptAnswers,
-        });
-        inputApiToken = await promptText({
-          question: '请输入 Cloudflare API Token (需 D1 Edit 权限)',
-          defaultValue: '',
-          promptAnswers,
-        });
-      }
+      const d1Out = await runInteractiveD1SetupWizard({
+        inputAccountId,
+        inputApiToken,
+        isInteractive,
+        globalDb,
+        promptAnswers,
+      });
+      inputAccountId = d1Out.inputAccountId;
+      inputApiToken = d1Out.inputApiToken;
 
       if (inputAccountId || inputApiToken) {
         saveMyShipFileConfig({
@@ -1170,22 +895,15 @@ export async function runUseCommand({
         storageDir,
       });
 
-      console.log('==============================================================');
-      console.log(
-        `✅ 项目 [${project}] Cloudflare D1 数据库已${
-          provisioned.action === 'created' ? '自动创建' : '绑定'
-        }并注入！`
-      );
-      console.log(`   ☁️  D1 数据库名:  ${dbName}`);
-      console.log(`   🆔 Database ID:  ${provisioned.databaseId}`);
-      console.log(`   🌍 环境模式:     ${envName} (本地 dev 自动映射至 .myship/data/${project}/local.sqlite)`);
-      console.log(`   🔐 隔离策略:     ${isolation}`);
-      console.log(`   📥 环境变量同步: ${persistedTo} (CF_ACCOUNT_ID, CF_D1_DATABASE_ID, CF_API_TOKEN)`);
-      console.log('--------------------------------------------------------------');
-      console.log('💡 在后端代码中零依赖直接使用：');
-      console.log("   await context.db.execute('CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, name TEXT)');");
-      console.log("   const rows = await context.db.query('SELECT * FROM items WHERE id = ?', [1]);");
-      console.log('==============================================================');
+      printD1BoundSummary({
+        project,
+        action: provisioned.action,
+        dbName,
+        databaseId: provisioned.databaseId,
+        envName,
+        isolation,
+        persistedTo,
+      });
       return {
         project,
         resource: 'db',
@@ -1202,44 +920,15 @@ export async function runUseCommand({
       let inputApiKey = getOpt('--api-key') || getOpt('--token');
       const inputProjectId = getOpt('--project-id');
 
-      if (
-        isInteractive &&
-        !inputUrl &&
-        !globalDb.neonMasterUrl &&
-        !inputApiKey &&
-        !globalDb.neonApiKey
-      ) {
-        const neonMode = await promptSelect({
-          title: '请选择 Neon Serverless PostgreSQL 接入方式',
-          items: [
-            {
-              label: '🔗 粘贴 Neon 主连接串 (推荐 · 单实例多 Schema 零成本隔离)',
-              hint: '[自动派生 myship_<project> Schema 并通过 HTTP /sql 创建]',
-              value: 'url',
-            },
-            {
-              label: '🔑 输入 Neon API Key (自动调用 Neon API v2 建库)',
-              hint: '[为每个项目创建独立逻辑 Database]',
-              value: 'api-key',
-            },
-          ],
-          defaultIndex: 0,
-          promptAnswers,
-        });
-        if (neonMode === 'api-key') {
-          inputApiKey = await promptText({
-            question: '请输入 Neon API Key',
-            defaultValue: '',
-            promptAnswers,
-          });
-        } else {
-          inputUrl = await promptText({
-            question: '请粘贴 Neon 连接串 (postgresql://neondb_owner:...@ep-xxx.neon.tech/neondb?sslmode=require)',
-            defaultValue: '',
-            promptAnswers,
-          });
-        }
-      }
+      const neonOut = await runInteractiveNeonSetupWizard({
+        inputUrl,
+        inputApiKey,
+        isInteractive,
+        globalDb,
+        promptAnswers,
+      });
+      inputUrl = neonOut.inputUrl;
+      inputApiKey = neonOut.inputApiKey;
 
       if ((!isRawUrl && inputUrl) || inputApiKey || inputProjectId) {
         saveMyShipFileConfig({
@@ -1334,25 +1023,15 @@ export async function runUseCommand({
         storageDir,
       });
 
-      console.log('==============================================================');
-      console.log(
-        `✅ 项目 [${project}] Neon Serverless PostgreSQL 已${
-          action === 'created' ? '自动创建数据库' : action === 'schema-isolated' ? '派生独立 Schema' : '绑定'
-        }并注入！`
-      );
-      if (dbName) {
-        console.log(`   🐘 独立逻辑库:   ${dbName}`);
-      } else {
-        console.log(`   🏷️  专属 Schema:  ${schema} (自动注入 search_path=${schema},public)`);
-      }
-      console.log(`   🌍 环境模式:     ${envName}`);
-      console.log(`   🔐 隔离策略:     ${isolation}`);
-      console.log(`   📥 环境变量同步: ${persistedTo} (NEON_DATABASE_URL, DATABASE_URL, PG_SCHEMA)`);
-      console.log('--------------------------------------------------------------');
-      console.log('💡 在后端代码中双模使用：');
-      console.log("   1. 零依赖内置 HTTP SQL: await context.db.query('SELECT * FROM users WHERE id = $1', [1]);");
-      console.log('   2. 标准生态驱动/ORM:    使用 `@neondatabase/serverless` / `drizzle-orm` / `pg` 连接 `process.env.DATABASE_URL`');
-      console.log('==============================================================');
+      printNeonBoundSummary({
+        project,
+        action,
+        dbName,
+        schema,
+        envName,
+        isolation,
+        persistedTo,
+      });
       return {
         project,
         resource: 'db',
@@ -1369,92 +1048,11 @@ export async function runUseCommand({
     );
   }
 
-  // 默认 status 视图
-  const globalDb = getGlobalDbProvidersConfig();
-  const endpoints = getEffectiveEndpoints();
-  const useLocal = Boolean(isLocal || !endpoints.isConfigured);
-  let envMap = {};
-  try {
-    envMap = useLocal
-      ? getLocalProjectEnv(project, storageDir)
-      : await getRemoteProjectEnv(project);
-  } catch {
-    // ignore
-  }
-
-  console.log('==============================================================');
-  console.log(`🧩 MyShip 项目资源注册状态 — 项目 [${project}]`);
-  console.log('--------------------------------------------------------------');
-  if (ctx.resources?.storage?.enabled) {
-    const s = ctx.resources.storage;
-    console.log(
-      `  📦 对象存储 (storage/files): ✅ 已启用 [env=${s.env || 'prod'}, isolation=${s.isolation || 'shared'}]`
-    );
-    console.log(`     - JSON 状态前缀: ${s.dataPrefix || `data/${project}/`}`);
-    console.log(`     - 文件存储前缀:  ${s.filesPrefix || `files/${project}/`}`);
-  } else {
-    console.log('  📦 对象存储 (storage/files): ⚪ 未显式声明 (运行 `myship use storage` 一键注入)');
-  }
-
-  if (ctx.resources?.db?.enabled) {
-    const d = ctx.resources.db;
-    console.log(
-      `  🗄️  数据库 (db):              ✅ 已启用 [provider=${d.provider}, env=${d.env || 'prod'}, isolation=${d.isolation || 'shared'}]`
-    );
-    if (d.provider === 'pg') {
-      console.log(`     - 专属 Schema:   ${d.schema || `myship_${project}`}`);
-    } else if (d.provider === 'mysql') {
-      console.log(`     - 数据库名称:    ${d.dbName || `myship_${project}`}`);
-    } else if (d.provider === 'neon') {
-      if (d.dbName) console.log(`     - 独立数据库名:  ${d.dbName}`);
-      console.log(`     - 专属 Schema:   ${d.schema || 'public'}`);
-    } else if (d.provider === 'turso') {
-      console.log(`     - 数据库名称:    ${d.dbName || `myship-${project}`}`);
-      console.log(`     - 连接地址:      ${d.databaseUrl || envMap.TURSO_DATABASE_URL || '(已注入)'}`);
-    } else if (d.provider === 'd1') {
-      console.log(`     - D1 数据库名:   ${d.dbName || `myship-${project}`}`);
-      console.log(`     - Database ID:   ${d.databaseId || envMap.CF_D1_DATABASE_ID || '(已注入)'}`);
-    }
-  } else {
-    console.log(
-      '  🗄️  数据库 (db):              ⚪ 未绑定 (运行 `myship use db [--provider <turso|d1|neon|pg|mysql>]` 一键开通)'
-    );
-  }
-
-  console.log('--------------------------------------------------------------');
-  console.log('🌐 全局数据库底座就绪状态 (~/.myship/config.json):');
-  console.log(
-    `   - ⭐ 全局默认平台:      ${globalDb.defaultDbProvider || 'turso (可通过 --set-default <provider> 修改)'}`
-  );
-  console.log(
-    `   - 腾讯云PG / 原生PG:    ${globalDb.pgMasterUrl ? '✅ 已配置 pgMasterUrl' : '⚪ 未配置 (--provider pg --url ...)'}`
-  );
-  console.log(
-    `   - 原生 MySQL / TiDB:   ${globalDb.mysqlMasterUrl ? '✅ 已配置 mysqlMasterUrl' : '⚪ 未配置 (--provider mysql --url ...)'}`
-  );
-  console.log(
-    `   - Neon Serverless PG:  ${
-      globalDb.neonApiKey
-        ? '✅ 已配置 neonApiKey (API 自动建库)'
-        : globalDb.neonMasterUrl
-        ? '✅ 已配置 neonMasterUrl (多 Schema 隔离)'
-        : '⚪ 未配置 (--provider neon --url ... 或 --token ...)'
-    }`
-  );
-  console.log(
-    `   - Turso Edge SQLite:   ${
-      globalDb.tursoOrg && globalDb.tursoApiToken
-        ? `✅ 已配置 (org: ${globalDb.tursoOrg})`
-        : '⚪ 未配置 (--provider turso --org ... --token ...)'
-    }`
-  );
-  console.log(
-    `   - Cloudflare D1:       ${
-      globalDb.cfAccountId && globalDb.cfApiToken
-        ? '✅ 已配置 (cfAccountId + cfApiToken)'
-        : '⚪ 未配置 (--provider d1 --account-id ... --token ...)'
-    }`
-  );
-  console.log('==============================================================');
-  return { project, resources: ctx.resources || {}, defaultDbProvider: globalDb.defaultDbProvider || 'turso' };
+  return renderUseResourceStatusView({
+    project,
+    ctx,
+    globalDb: getGlobalDbProvidersConfig(),
+    isLocal,
+    storageDir,
+  });
 }

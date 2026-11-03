@@ -13,7 +13,7 @@
 import { existsSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { normalizeDomainToken } from './project-context.mjs';
-import { executeCloudBasePgSql } from './cos-client.mjs';
+import { executeCloudBasePgSql } from './tcb-client.mjs';
 
 function attachQueryResultMeta(rows, rowsAffected = 0, lastInsertRowid = null) {
   const arr = Array.isArray(rows) ? rows : [];

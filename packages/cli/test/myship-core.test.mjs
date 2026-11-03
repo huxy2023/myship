@@ -37,6 +37,7 @@ import {
   installMyShipSkill,
   getMyShipSkillStatus,
   runSkillCommand,
+  scaffoldProjectTemplate,
   createLocalFileStorage,
   createCloudStorage,
 } from '../myship.mjs';
@@ -936,4 +937,185 @@ export async function fetch(request, context) {
   assert.equal(cloudTtl, 600, `Expected cloud presignUrl expiresIn=600, got ${cloudTtl}`);
 
   rmSync(skillTmp, { recursive: true, force: true });
+});
+
+test('8. Project scaffolding (`myship init --template static | edge | fullstack` & interactive create)', async () => {
+  const tmpRoot = mkdtempSync(join(tmpdir(), 'myship-test-scaffold-'));
+  try {
+    // 1) Static template + idempotency (skip existing files unless overwrite=true)
+    const staticDir = join(tmpRoot, 'my-static-site');
+    const s1 = await scaffoldProjectTemplate(staticDir, { template: 'static' });
+    assert.equal(s1.project, 'my-static-site');
+    assert.equal(s1.template, 'static');
+    assert.equal(s1.dir, '.');
+    assert(s1.createdFiles.includes('index.html'));
+    writeFileSync(join(staticDir, 'index.html'), '<h1>Custom Static</h1>', 'utf8');
+
+    const s2 = await scaffoldProjectTemplate(staticDir, { template: 'static', overwrite: false });
+    assert(s2.skippedFiles.includes('index.html'));
+    assert.equal(readFileSync(join(staticDir, 'index.html'), 'utf8'), '<h1>Custom Static</h1>');
+
+    const s3 = await scaffoldProjectTemplate(staticDir, { template: 'static', overwrite: true });
+    assert(s3.createdFiles.includes('index.html'));
+    assert(readFileSync(join(staticDir, 'index.html'), 'utf8').includes('MyShip Static Starter'));
+
+    // 2) Edge template + end-to-end dev handler execution
+    const edgeDir = join(tmpRoot, 'my-edge-app');
+    const e1 = await scaffoldProjectTemplate(edgeDir, { template: 'edge' });
+    assert.equal(e1.template, 'edge');
+    assert(existsSync(join(edgeDir, 'api/hello.js')));
+    const edgeHandler = createDevRequestHandler({
+      staticDir: edgeDir,
+      cwd: edgeDir,
+      project: e1.project,
+      storageDir: join(edgeDir, '.cas-storage'),
+    });
+    const edgePost = await edgeHandler(
+      new Request('http://localhost:3000/api/hello', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ delta: 3 }),
+      })
+    );
+    assert.equal(edgePost.status, 200);
+    const edgeJson = await edgePost.json();
+    assert.equal(edgeJson.ok, true);
+    assert.equal(edgeJson.counter.count, 3);
+
+    // 3) Fullstack template (via interactive prompt selection) + end-to-end dev handler & SCF bundler
+    const fsDir = join(tmpRoot, 'my-fullstack-app');
+    const f1 = await scaffoldProjectTemplate(fsDir, {
+      interactive: true,
+      promptAnswers: { template: 'fullstack' },
+    });
+    assert.equal(f1.template, 'fullstack');
+    assert.equal(f1.dir, './public');
+    assert(existsSync(join(fsDir, 'server/index.mjs')));
+    assert(existsSync(join(fsDir, 'public/index.html')));
+
+    const fsHandler = createDevRequestHandler({
+      staticDir: join(fsDir, 'public'),
+      cwd: fsDir,
+      project: f1.project,
+      storageDir: join(fsDir, '.cas-storage'),
+    });
+    const healthRes = await fsHandler(new Request('http://localhost:3000/api/health'));
+    assert.equal(healthRes.status, 200);
+    const healthJson = await healthRes.json();
+    assert.equal(healthJson.ok, true);
+    assert.equal(healthJson.capabilities.db, true);
+
+    const noteRes = await fsHandler(
+      new Request('http://localhost:3000/api/notes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: 'Hello Scaffold DB' }),
+      })
+    );
+    assert.equal(noteRes.status, 200);
+    const noteJson = await noteRes.json();
+    assert.equal(noteJson.notes[0].title, 'Hello Scaffold DB');
+
+    const bundleRes = await bundleScfBackend({ cwd: fsDir });
+    assert(bundleRes.zipEntries.includes('server/index.mjs'));
+    assert(bundleRes.zipEntries.includes('server/templates/banner.txt'));
+    assert(bundleRes.zipEntries.includes('_myship/bootstrap.mjs'));
+    assert(bundleRes.zipSizeBytes > 1000);
+
+    // Verify fullstack project.json does NOT falsely mark resources.db.enabled = true before `myship use db`
+    const fsProjectCfg = JSON.parse(readFileSync(join(fsDir, '.myship/project.json'), 'utf8'));
+    assert.equal(fsProjectCfg.resources?.storage?.enabled, true);
+    assert.equal(fsProjectCfg.resources?.db, undefined);
+
+    // Verify generated server/index.mjs returns friendly 503 needsSetup when cloud DB is unconfigured
+    const fsServerMod = await import(`file://${join(fsDir, 'server/index.mjs')}`);
+    const unconfHealth = await fsServerMod.fetch(new Request('http://localhost/api/health'), {
+      project: f1.project,
+      db: { provider: 'unconfigured' },
+      storage: {},
+      files: {},
+    });
+    const unconfHealthBody = await unconfHealth.json();
+    assert.equal(unconfHealthBody.capabilities.db, false);
+    assert.equal(unconfHealthBody.dbProvider, 'unconfigured');
+
+    const unconfNotes = await fsServerMod.fetch(new Request('http://localhost/api/notes'), {
+      project: f1.project,
+      db: { provider: 'unconfigured' },
+    });
+    assert.equal(unconfNotes.status, 503);
+    const unconfNotesBody = await unconfNotes.json();
+    assert.equal(unconfNotesBody.ok, false);
+    assert.equal(unconfNotesBody.needsSetup, true);
+    assert.equal(unconfNotesBody.setupCommand, 'myship use db');
+
+    // 4) Preserving existing .myship/project.json & respecting package.json name when overwrite=false
+    const existingDir = join(tmpRoot, 'folder-name-ignored');
+    mkdirSync(join(existingDir, '.myship'), { recursive: true });
+    writeFileSync(
+      join(existingDir, '.myship/project.json'),
+      JSON.stringify(
+        {
+          project: 'existing-custom-proj',
+          dir: './dist',
+          prodDomain: 'custom-prod',
+          backend: {
+            enabled: true,
+            provider: 'scf',
+            region: 'ap-shanghai',
+            entry: 'custom/server.mjs',
+            functionName: 'myship-existing-custom-proj',
+            gatewayToken: 'tok_keep_me',
+            role: 'SCF_QcsRole',
+          },
+        },
+        null,
+        2
+      ),
+      'utf8'
+    );
+    const exRes = await scaffoldProjectTemplate(existingDir, {
+      template: 'fullstack',
+      overwrite: false,
+    });
+    assert.equal(exRes.project, 'existing-custom-proj');
+    assert.equal(exRes.dir, './dist');
+    assert(exRes.skippedFiles.includes('.myship/project.json'));
+    const preservedJson = JSON.parse(
+      readFileSync(join(existingDir, '.myship/project.json'), 'utf8')
+    );
+    assert.equal(preservedJson.project, 'existing-custom-proj');
+    assert.equal(preservedJson.dir, './dist');
+    assert.equal(preservedJson.prodDomain, 'custom-prod');
+    assert.equal(preservedJson.backend.gatewayToken, 'tok_keep_me');
+    assert.equal(preservedJson.backend.role, 'SCF_QcsRole');
+    assert.equal(preservedJson.backend.entry, 'custom/server.mjs');
+
+    // Also verify running setupCiWorkflow (or `myship init --template fullstack --ci`) preserves custom prodDomain and existing project.json
+    const ciOnExisting = setupCiWorkflow(existingDir, { overwrite: false });
+    assert.equal(ciOnExisting.project, 'existing-custom-proj');
+    assert.equal(ciOnExisting.buildDir, './dist');
+    const afterCiJson = JSON.parse(
+      readFileSync(join(existingDir, '.myship/project.json'), 'utf8')
+    );
+    assert.equal(afterCiJson.prodDomain, 'custom-prod');
+    assert.equal(afterCiJson.backend.gatewayToken, 'tok_keep_me');
+
+    // 5) Real CLI subprocess test: `myship init --template fullstack --dir ./demo --ci`
+    const cliEntry = resolve(__dirname, '../myship.mjs');
+    const cliRes = spawnSync(
+      process.execPath,
+      [cliEntry, 'init', '--template', 'fullstack', '--dir', './demo', '--ci'],
+      { cwd: tmpRoot, encoding: 'utf8' }
+    );
+    assert.equal(cliRes.status, 0, `CLI failed: ${cliRes.stderr}`);
+    const demoDir = join(tmpRoot, 'demo');
+    const demoProjJson = JSON.parse(readFileSync(join(demoDir, '.myship/project.json'), 'utf8'));
+    assert.equal(demoProjJson.project, 'demo');
+    assert.equal(demoProjJson.dir, './public');
+    const demoCiYaml = readFileSync(join(demoDir, '.github/workflows/myship.yml'), 'utf8');
+    assert(demoCiYaml.includes('MYSHIP_DIR: "./public"'));
+  } finally {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
 });

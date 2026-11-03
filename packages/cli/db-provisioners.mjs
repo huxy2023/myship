@@ -8,7 +8,7 @@
  * 4. Turso Edge SQLite (Turso Platform API 自动识别组织、初始化默认 Group、创建 Database 并签发 JWT Token)
  * 5. Cloudflare D1 (Cloudflare v4 API 自动查找或创建 D1 数据库)
  */
-import { executeCloudBasePgSql } from './cos-client.mjs';
+import { executeCloudBasePgSql } from './tcb-client.mjs';
 
 export function sanitizePgSchemaIdent(str) {
   return (

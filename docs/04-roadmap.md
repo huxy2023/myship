@@ -66,20 +66,27 @@ flowchart LR
 
 ## 四、下一阶段演进待选池 (Next Horizon Backlog)
 
-在五大核心架构层级（Layer 1–5）全部跑通闭环的基础上，后续迭代遵循**“克制交付、反过度设计、按需择机推进”**原则，重点围绕以下四个高价值方向展开：
+在五大核心架构层级（Layer 1–5）全部跑通闭环的基础上，后续迭代遵循**“克制交付、反过度设计、按需择机推进”**原则，重点围绕以下六个高价值方向展开：
 
-### 1. 📦 全栈标准样板工程与 NPM 版本持续交付 (`Full-Stack Starter & Release`)
+### 1. 📦 全栈标准样板工程与 NPM 版本持续交付 (`Full-Stack Starter & Release` · ✅ 已实现)
 - **NPM 正式包迭代发布**：将本地与云端 100% 同源的模块化运行时（`db-client.mjs`、`storage-client.mjs`、`scf-bootstrap-runtime.mjs`）及新账号零配置初始化能力持续同步至 `@myship/cli` 官方源。
 - **全栈黄金样板工程 (`examples/fullstack-starter`)**：提供一套最小闭环的全栈参考范本，完整串联「前端静态构建 + `server/index.mjs` (SCF Web 函数) + `context.db` 数据库读写 + `context.files.presignUrl` 对象存储直传」，既作为端到端冒烟验证基准，也作为开发者新建全栈项目的开箱模板。
 
-### 2. 🖥️ `myship console` 可视化管控台全栈化升级 (`Console v2`)
-- **云资源状态全景面板**：在本地 `127.0.0.1:4200` 管控台中直观展示各项目通过 `myship use` 绑定的数据库引擎（PG / Neon / Turso / D1 / MySQL）、隔离 Schema / 库名及 COS 存储前缀（`data/<project>/`、`files/<project>/`）。
+### 2. 🖥️ `myship console` 可视化管控台全栈化升级 (`Console v2` · ✅ 已实现)
+- **云资源状态全景面板**：在本地 `127.0.0.1:4200` 管控台中直观展示各项目通过 `myship use` 绑定的数据库引擎（PG / Neon / Turso / D1 / MySQL）、隔离 Schema / 库名及 COS 存储前缀（`data/<project>/`、`files/<project>/`），并提供在线只读表数据与对象浏览器。
 - **SCF 全栈版本与日志聚合视图**：在管控台的部署快照详情中展示绑定的 SCF 不可变版本号（`manifest.backend`），并集成 `myship logs` 云端运行日志与 SourceMap 源码级报错堆栈一键查看能力。
 
-### 3. 🧹 第二阶段模块化内聚治理 (`Modular Architecture Phase 2`)
-- **交互式向导独立拆分 (`resource-wizards.mjs`)**：将 `packages/cli/resource-manager.mjs` 中的终端交互式引导流程（`runInteractiveUseWizard` / `runInteractiveDbWizard`）独立拆出，使单个模块文件严格控制在 800~900 行以内。
+### 3. 🧹 第二阶段模块化内聚治理 (`Modular Architecture Phase 2` · ✅ 已实现)
+- **交互式向导独立拆分 (`resource-wizards.mjs`)**：将 `packages/cli/resource-manager.mjs` 中的终端交互式引导流程（`promptUseTargetWizard` / `promptDbProviderWizard` / 各数据库交互式参数采集与状态面板）独立拆出，使 `resource-manager.mjs` 专注于声明式资源编排。
 - **云厂商管控面客户端正交化 (`teo-client.mjs` / `tcb-client.mjs`)**：将 `packages/cli/cos-client.mjs` 中混放的腾讯云 EdgeOne (`TEO`) 与 CloudBase (`TCB`) 管控面 API 剥离为独立模块，使 `cos-client.mjs` 100% 专注于对象存储数据面与 XML v5 签名。
 
 ### 4. 🤖 AI Vibecoding 专属技能包封装 (`myship-skill` · ✅ 已实现)
 - **高密度渐进式 Agent Skill (`skills/myship-skill/SKILL.md` + `references/`)**：面向 Google Antigravity、Claude Code、Cursor 等 AI 编程代理，封装标准化的 MyShip 全栈开发技能指令（涵盖架构选型决策树、`myship use` 资源编排、`context.db` 各数据库 SQL 方言规范、`context.files.presignUrl` 预签名直传范式、`server/index.mjs` 打包契约与 6 大避坑铁律）。
 - **CLI 一键分发与在线直链 (`myship skill`)**：支持执行 `myship skill install -g` 一键安装至本机全局 AI 代理目录（`~/.gemini/config/skills/`、`~/.agents/skills/`、`~/.claude/skills/`）或当前工程 `.agents/skills/myship-skill/`，同时在官网提供 `/skill/SKILL.md` 在线直链。
+
+### 5. 🩺 云底座与项目健康巡检诊断 (`myship doctor` · 待选)
+- **全局底座与凭证有效性自检**：一键检测本机 `~/.myship/config.json` 或 `~/.tccli/default.credential` 凭证状态（若为 STS 临时凭证则提示剩余有效期）、COS 存储桶连通性与读写权限，以及 EdgeOne 泛域名网关 `myship-cas-router` 的在线响应状态。
+- **项目级数据库与云函数连通性探针**：针对当前项目已通过 `myship use` 绑定的数据库（CloudBase PG / Neon / Turso / D1 / MySQL）自动执行 `SELECT 1` 与隔离 Schema 存在性核验，输出清晰的逐项勾检报告与修复命令建议。
+
+### 6. 🚀 零摩擦全栈工程脚手架生成 (`myship init --template` · ✅ 已实现)
+- **开箱即用的轻量标准模板 (`packages/cli/template-generator.mjs`)**：支持在空目录执行 `myship init --template static | edge | fullstack`（或交互式 `myship create [目录]`），一键生成最小可运行的静态页、边缘函数 (`api/hello.js`) 或 SCF 全栈后端 (`server/index.mjs` + `.myship/project.json`) 骨架，默认非破坏性保留已有文件，实现从空目录到 `myship dev` / `myship` 上线的 10 秒闭环。

@@ -189,7 +189,7 @@ ${bundledCss}
         <a href="https://www.npmjs.com/package/@myship/cli" target="_blank" rel="noopener" class="doc-link">NPM (@myship/cli)</a>
         <a href="https://fullstack-starter.ship.onehub.top" target="_blank" rel="noopener" class="doc-link">Full-Stack Starter</a>
         <a href="/skill/SKILL.md" target="_blank" class="doc-link">AI Skill (SKILL.md)</a>
-        <a href="/mascot-skipper.png" target="_blank" class="doc-link">吉祥物 Skipper</a>
+        <a href="/mascot-skipper.svg" target="_blank" class="doc-link">吉祥物 Skipper</a>
         <a href="/llms.txt" target="_blank" class="doc-link">llms.txt</a>
         <a href="/llms-full.txt" target="_blank" class="doc-link">llms-full.txt</a>
       </div>
@@ -336,23 +336,25 @@ export async function onRequestPost(context) {
 }
 
 function renderBrandBanner() {
-  const mascotPng = readFileSync(resolve(PUBLIC_DIR, 'mascot-skipper.png')).toString('base64');
-  const mascot = `<image x="690" y="72" width="450" height="486" preserveAspectRatio="xMidYMid slice" clip-path="url(#mascot-clip)" href="data:image/png;base64,${mascotPng}"/>`;
+  const innerMascot = MASCOT_SVG
+    .replace(/^<svg[^>]*>/i, '')
+    .replace(/<\/svg>\s*$/i, '');
   return `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="banner-title">
   <title id="banner-title">MyShip — 自有云海，一令启航。</title>
-  <rect width="1200" height="630" fill="#FFF8EE"/>
-  <defs><clipPath id="mascot-clip"><rect x="690" y="72" width="450" height="486" rx="64"/></clipPath></defs>
-  <rect x="690" y="72" width="450" height="486" rx="64" fill="#203A50"/>
-  <g fill="#253F54" font-family="Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif">
+  <rect width="1200" height="630" fill="#FFF9F1"/>
+  <rect x="690" y="72" width="450" height="486" rx="64" fill="#EDF5FA"/>
+  <g fill="#243B4E" font-family="Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif">
     <text x="72" y="122" font-size="46" font-weight="700" letter-spacing="-1.5">MyShip</text>
-    <text x="74" y="164" font-size="15" letter-spacing="3" fill="#62849C">OPEN SOURCE · YOUR CLOUD</text>
+    <text x="74" y="164" font-size="15" letter-spacing="3" fill="#587E99">OPEN SOURCE · YOUR CLOUD</text>
     <text x="68" y="278" font-size="64" font-weight="600">自有云海，</text>
     <text x="68" y="360" font-size="64" font-weight="600">一令启航。</text>
-    <text x="74" y="422" font-size="24" fill="#526D80">把作品部署到你自己的云上。</text>
-    <text x="74" y="486" font-size="19" fill="#526D80">Your Cloud. Your Fleet. One Command to Ship.</text>
-    <text x="74" y="558" font-size="17" fill="#62849C">myship.ship.onehub.top</text>
+    <text x="74" y="422" font-size="24" fill="#4D687B">把作品部署到你自己的云上。</text>
+    <text x="74" y="486" font-size="19" fill="#4D687B">Your Cloud. Your Fleet. One Command to Ship.</text>
+    <text x="74" y="558" font-size="17" fill="#587E99">myship.ship.onehub.top</text>
   </g>
-  ${mascot}
+  <svg x="705" y="95" width="420" height="420" viewBox="0 0 512 512">
+    ${innerMascot}
+  </svg>
 </svg>`;
 }
 

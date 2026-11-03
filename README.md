@@ -167,14 +167,18 @@ myship/
 ├── packages/
 │   ├── cli/                             # @myship/cli — 核心 CLI 与全栈运行时套件
 │   │   ├── myship.mjs                   # CLI 命令路由与主控入口
-│   │   ├── cos-client.mjs               # 腾讯云 COS XML v5、EdgeOne TEO、SCF 与 TCB API 签名客户端
+│   │   ├── cos-client.mjs               # 腾讯云 COS XML v5 数据面签名客户端与全局凭证管理
+│   │   ├── teo-client.mjs               # 腾讯云 EdgeOne (TEO) 管控面 API v3 与边缘函数路由编排
+│   │   ├── tcb-client.mjs               # 腾讯云 CloudBase (TCB) 管控面 ExecutePGSql 与环境自动发现
 │   │   ├── scf-bundler.mjs              # 全栈 esbuild 打包器、SCF 不可变版本发布与云端日志聚合器
 │   │   ├── scf-bootstrap-runtime.mjs    # 云端 SCF 9000 端口 HTTP 容器引导层 (由 esbuild 真实编译打包)
 │   │   ├── db-client.mjs                # 本地与云端 100% 共享的多引擎 SQL 客户端 (SQLite/Turso/D1/PG/Neon/MySQL)
 │   │   ├── storage-client.mjs           # 本地与云端共享的 context.storage (KV)、context.files 与模块派发器
-│   │   ├── resource-manager.mjs         # myship use 声明式云资源注册、交互式向导与凭证编排器
+│   │   ├── resource-manager.mjs         # myship use 声明式云资源注册与凭证编排器
+│   │   ├── resource-wizards.mjs         # myship use 交互式 TUI 向导与资源状态面板
 │   │   ├── db-provisioners.mjs          # 五大数据库底层 Wire 协议与 HTTP API 自动建库/分 Schema 引擎
 │   │   ├── tui-prompts.mjs              # 终端 Raw-Mode 方向键交互式选择器与输入组件
+│   │   ├── template-generator.mjs       # myship init --template 零摩擦静态/边缘/全栈脚手架生成器
 │   │   ├── console-server.mjs           # myship console 本地可视化管控台服务 (127.0.0.1:4200)
 │   │   └── test/                        # 领域解耦的自动化测试套件 (core / resources / db-runtime)
 │   │
@@ -211,17 +215,17 @@ myship/
 
 ## 品牌与吉祥物：小海豹 Skipper
 
-<img src="./apps/site/public/mascot-skipper.png" alt="MyShip 吉祥物：戴纸船帽的小海豹 Skipper" width="180" align="right" />
+<img src="./apps/site/public/mascot-skipper.svg" alt="MyShip 吉祥物：戴纸船帽的小海豹 Skipper" width="180" align="right" />
 
 **自有云海，一令启航。**<br>
 *Your Cloud. Your Fleet. One Command to Ship.*
 
-Skipper 是一只戴着珊瑚橘纸船帽的小海豹。奶油色的身体、简单的微笑，陪你把做好的作品带到自己的云上。
+Skipper 是一只戴着小号珊瑚橘纸船帽的小海豹。纯净暖奶油色的身体、同色系软萌小前鳍与轻柔的海浪呼吸动效，陪你把做好的作品带到自己的云上。
 
-- **[Logo](./apps/site/public/logo.png)**：深墨蓝底海豹，用于项目头像；导航栏与控制台使用简化小图标。
-- **[Favicon](./apps/site/public/favicon.svg)**：简化的海豹头像，适配浏览器标签页。
-- **[吉祥物图片](./apps/site/public/mascot-skipper.png)**：保留柔和质感的完整角色，用于官网和介绍材料。
-- **[品牌素材使用说明](./docs/05-brand-assets.md)**：矢量源、分享图与导出方式。
+- **[Logo](./apps/site/public/logo.svg)**：静谧海蓝底衬的小海豹图标，用于项目头像、网站导航栏与控制台。
+- **[Favicon](./apps/site/public/favicon.svg)**：简化的高辨识度海豹头像，适配 16–32 px 浏览器标签页。
+- **[吉祥物 Skipper](./apps/site/public/mascot-skipper.svg)**：透明底带轻柔呼吸浮动动效的完整矢量角色，自适应深浅双主题。
+- **[品牌素材使用说明](./docs/05-brand-assets.md)**：矢量源、配色规范、分享图与导出方式。
 
 <br clear="both" />
 

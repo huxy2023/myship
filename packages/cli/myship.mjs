@@ -56,6 +56,11 @@ import {
 } from './lifecycle.mjs';
 import { startDevServer } from './dev-server.mjs';
 import { setupCiWorkflow } from './ci-generator.mjs';
+import {
+  scaffoldProjectTemplate,
+  TEMPLATE_DEFINITIONS,
+  normalizeTemplateName,
+} from './template-generator.mjs';
 import { startConsoleServer } from './console-server.mjs';
 import {
   runBackendCommand,
@@ -80,6 +85,7 @@ export * from './core-cas.mjs';
 export * from './lifecycle.mjs';
 export * from './dev-server.mjs';
 export * from './ci-generator.mjs';
+export * from './template-generator.mjs';
 export * from './console-server.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -270,7 +276,10 @@ function printHelp() {
   myship logs [--error] [--limit 20]           查看当前项目 SCF 业务后端的实时运行日志与错误堆栈
 
 项目管理与切流回滚命令:
-  myship init [项目名] [--scf] [--ci]          初始化 .myship/project.json (加 --scf 同步开启全栈后端，加 --ci 生成 GitHub Actions)
+  myship init [项目名] [--template <static|edge|fullstack>] [--scf] [--ci]
+                                               初始化项目命名空间，或一键生成静态/边缘/全栈标准工程脚手架
+  myship create [目录] [--template <static|edge|fullstack>]
+                                               在指定目录交互式创建开箱即用的 MyShip 静态/边缘/全栈工程
   myship dev [目录] [--port 3000]              启动本地全栈即时开发服务器 (与云端 SCF 同源运行 Node 后端、公共模块与持久化存储)
   myship console [--port 4200] [--local]       启动轻量单页 Web 可视化管控台 (本机 127.0.0.1 直连云端/沙盒，一键切流/回滚/Diff/环境变量/GC)
   myship ls [--all | -A]                       默认仅列出【当前项目】的历史构建与域名；加 --all 按项目分组列出全局所有记录
@@ -312,6 +321,7 @@ if (isMainModule) {
   const isErrorsOnly = rawArgs.includes('--error') || rawArgs.includes('--errors');
   const isGlobalSkill = rawArgs.includes('--global') || rawArgs.includes('-g');
   const isClaudeSkill = rawArgs.includes('--claude');
+  const isInteractiveFlag = rawArgs.includes('--interactive') || rawArgs.includes('-i');
 
   const domains = [];
   const aliasTargets = [];
@@ -320,6 +330,7 @@ if (isMainModule) {
   let explicitEntry = null;
   let explicitRegion = null;
   let explicitRole = null;
+  let templateArg = null;
   let keepArg = null;
   let olderThanArg = null;
   let portArg = null;
@@ -343,6 +354,14 @@ if (isMainModule) {
       if (rawArgs[i + 1]) explicitRegion = rawArgs[++i];
     } else if (arg === '--role') {
       if (rawArgs[i + 1]) explicitRole = rawArgs[++i];
+    } else if (arg === '--template' || arg === '-T') {
+      if (rawArgs[i + 1] && !rawArgs[i + 1].startsWith('-')) {
+        templateArg = rawArgs[++i];
+      } else {
+        templateArg = 'prompt';
+      }
+    } else if (arg.startsWith('--template=')) {
+      templateArg = arg.slice('--template='.length) || 'prompt';
     } else if (arg === '--to' || arg === '--target' || arg === '-t') {
       if (rawArgs[i + 1]) rollbackTargetArg = rawArgs[++i];
     } else if (arg === '--limit' || arg === '-n') {
@@ -386,6 +405,8 @@ if (isMainModule) {
         '--global',
         '-g',
         '--claude',
+        '--interactive',
+        '-i',
       ].includes(arg)
     ) {
       // flag handled
@@ -474,7 +495,28 @@ if (isMainModule) {
       });
       return;
     }
-    if (first === 'init' || first === 'ci') {
+    if (first === 'init' || first === 'create' || first === 'ci') {
+      if (first === 'create' || templateArg || isInteractiveFlag) {
+        const targetDir =
+          first === 'create' && positional[1]
+            ? resolve(process.cwd(), positional[1])
+            : explicitDir
+            ? resolve(process.cwd(), explicitDir)
+            : process.cwd();
+        await scaffoldProjectTemplate(targetDir, {
+          template: templateArg || (isScfFlag ? 'fullstack' : 'prompt'),
+          project: explicitProject || (first === 'init' ? positional[1] : null),
+          overwrite: isForce,
+          interactive: isInteractiveFlag || first === 'create' || templateArg === 'prompt',
+        });
+        if (isCi) {
+          setupCiWorkflow(targetDir, {
+            syncSecrets: isSyncSecrets,
+            overwrite: isForce,
+          });
+        }
+        return;
+      }
       if (isCi || first === 'ci') {
         setupCiWorkflow(process.cwd(), {
           project: positional[1] || explicitProject,

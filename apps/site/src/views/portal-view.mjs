@@ -327,9 +327,9 @@ export function renderPortalView() {
         <div>
           <span class="bento-badge">MEET SKIPPER</span>
           <h3 id="mascot-title">戴上纸船帽，一起出发。</h3>
-          <p>这是 MyShip 的小海豹 Skipper。奶油色的身体、一顶小小的珊瑚橘纸船帽，陪你把做好的作品带到自己的云上。</p>
+          <p>这是 MyShip 的小海豹 Skipper。暖奶油色的身体、一顶小小的珊瑚橘纸船帽，随着海浪轻轻呼吸浮动，陪你把做好的作品带到自己的云上。</p>
         </div>
-        <img src="/mascot-skipper.png" alt="Skipper：戴着珊瑚橘纸船帽、微笑的小海豹" width="260" height="260" loading="lazy" />
+        <img src="/mascot-skipper.svg" alt="Skipper：戴着珊瑚橘纸船帽、微笑的小海豹" width="260" height="260" loading="lazy" />
       </section>
     </div>
   </main>`;

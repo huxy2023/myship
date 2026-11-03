@@ -59,6 +59,7 @@ export async function fetch(request, context) {
 
   // 1. GET /api/health — 运行时与资源绑定自检
   if (path === '/api/health' && method === 'GET') {
+    const dbReady = Boolean(context.db && context.db.provider !== 'unconfigured');
     return Response.json({
       ok: true,
       banner: BANNER_TEXT,
@@ -66,11 +67,11 @@ export async function fetch(request, context) {
       subdomain: context.subdomain,
       deploymentId: context.deploymentId,
       nodeVersion: process.version,
-      dbProvider: context.db?.provider || 'sqlite',
+      dbProvider: context.db?.provider || 'unconfigured',
       capabilities: {
         storage: Boolean(context.storage),
         files: Boolean(context.files),
-        db: Boolean(context.db),
+        db: dbReady,
       },
       timestamp: new Date().toISOString(),
     });
@@ -101,6 +102,20 @@ export async function fetch(request, context) {
 
   // 3. GET / POST / DELETE /api/notes — context.db (多引擎 SQL 读写)
   if (path === '/api/notes') {
+    if (!context.db || context.db.provider === 'unconfigured') {
+      return Response.json(
+        {
+          ok: false,
+          needsSetup: true,
+          provider: 'unconfigured',
+          setupCommand: 'myship use db',
+          error:
+            '当前项目尚未绑定云端数据库。请在项目根目录执行 "myship use db" 一键开通并注入数据库凭证后再执行 "myship" 发布。',
+          notes: [],
+        },
+        { status: 503 }
+      );
+    }
     const provider = await ensureNotesTable(context.db);
     const isPg =
       provider === 'pg' ||

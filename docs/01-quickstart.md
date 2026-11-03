@@ -65,7 +65,21 @@ myship whoami
 
 当你同时开发 `app1`、`app2` 等多个项目时，`MyShip` 会通过项目根目录下的 `.myship/project.json` 自动隔离域名、环境变量、存储前缀与历史记录：
 
-### 1. 零参数直发主环境 (`myship`)
+### 1. 零参数直发主环境 (`myship`) 与工程脚手架 (`myship init --template`)
+
+如果你在一个全新目录想从零启动项目，可直接通过内置脚手架一键生成静态、边缘或全栈黄金样板：
+
+```bash
+# 一键生成全栈黄金样板 (public/ + server/index.mjs + DB + Files + Storage)
+myship init --template fullstack
+
+# 或生成边缘函数样板 (index.html + api/hello.js) / 纯静态样板 (index.html)
+myship init --template edge
+myship init --template static
+
+# 也可通过交互式菜单在新目录创建工程
+myship create my-new-app
+```
 
 进入任意项目（如 `app1`），构建后直接输入 6 个字母：
 

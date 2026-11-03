@@ -309,9 +309,10 @@ export function detectProjectContext(cwd = process.cwd(), explicitProject = null
 }
 
 export function ensureProjectConfig(cwd = process.cwd(), overrides = {}) {
-  const ctx = detectProjectContext(cwd, overrides.project);
+  const ctx = detectProjectContext(cwd);
   ensureMyShipGitignore(ctx.myshipDir);
   const nextProject = overrides.project ? normalizeDomainToken(overrides.project) : ctx.project;
+  const projectChanged = Boolean(overrides.project && nextProject !== ctx.project);
   const nextBackend =
     overrides.backend !== undefined
       ? overrides.backend
@@ -329,8 +330,8 @@ export function ensureProjectConfig(cwd = process.cwd(), overrides = {}) {
     dir: overrides.dir || ctx.buildDir || './dist',
     prodDomain: overrides.prodDomain
       ? normalizeDomainToken(overrides.prodDomain)
-      : overrides.project
-      ? normalizeDomainToken(overrides.project)
+      : projectChanged || !ctx.hasSavedConfig
+      ? nextProject
       : ctx.prodDomain,
     ...(nextBackend ? { backend: nextBackend } : {}),
     ...(nextResources && Object.keys(nextResources).length > 0 ? { resources: nextResources } : {}),

@@ -156,10 +156,13 @@ export function setupCiWorkflow(
       targetDir = '.';
     }
   }
-  const cfg = ensureProjectConfig(cwd, {
-    project: project || ctx.project,
-    dir: targetDir || './dist',
-  });
+  const cfg =
+    ctx.hasSavedConfig && !project && !dir
+      ? { ...ctx, dir: ctx.buildDir || './dist' }
+      : ensureProjectConfig(cwd, {
+          ...(project ? { project } : {}),
+          dir: targetDir || './dist',
+        });
 
   const workflowsDir = resolve(cwd, '.github', 'workflows');
   mkdirSync(workflowsDir, { recursive: true });

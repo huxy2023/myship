@@ -17,6 +17,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -40,8 +42,33 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Create GitHub Release
+      - name: Extract Structured Release Notes & Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
-        run: gh release create "${{ github.ref_name }}" --generate-notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const tag = process.env.TAG_NAME;
+            const changelog = fs.existsSync("CHANGELOG.md") ? fs.readFileSync("CHANGELOG.md", "utf8") : "";
+            const sections = changelog.split(/^## \[/m);
+            const sec = sections.find(s => s.startsWith(tag + "]"));
+            let title = `⚓ MyShip ${tag}`;
+            let body = `Released **@myship/cli ${tag}** to NPM.\n\n\`\`\`bash\nnpm install -g @myship/cli@${tag.replace(/^v/, "")}\n\`\`\``;
+            if (sec) {
+              const firstNl = sec.indexOf("\n");
+              const headerLine = firstNl !== -1 ? sec.slice(0, firstNl) : sec;
+              const subtitle = headerLine.replace(/^[^\]]+\]\s*—\s*/, "").trim();
+              if (subtitle) title = `⚓ MyShip ${tag} — ${subtitle}`;
+              body = (firstNl !== -1 ? sec.slice(firstNl + 1) : "").replace(/\n---\s*$/, "").trim();
+            }
+            fs.writeFileSync("/tmp/release-title.txt", title, "utf8");
+            fs.writeFileSync("/tmp/release-notes.md", body + "\n", "utf8");
+          '
+          TITLE="$(cat /tmp/release-title.txt)"
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release edit "$TAG_NAME" --title "$TITLE" --notes-file /tmp/release-notes.md
+          else
+            gh release create "$TAG_NAME" --title "$TITLE" --notes-file /tmp/release-notes.md
+          fi

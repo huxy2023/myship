@@ -27,9 +27,11 @@ Before writing code, select the minimal sufficient runtime tier for the user's p
 
 ## 2. Standard 5-Step Vibecoding Workflow
 
-1. **Inspect Context & Auth (`whoami`)**:
+1. **Inspect Context, Auth & Optional Scaffolding (`whoami` / `init --template`)**:
    ```bash
    myship whoami
+   # If starting in an empty directory, scaffold a ready-to-run template:
+   myship init --template fullstack   # or: static | edge
    ```
    Verify `~/.myship/config.json` is authenticated and check `.myship/project.json` for project name, custom `dir`, `backend`, and `resources`.
 

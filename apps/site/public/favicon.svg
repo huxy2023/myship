@@ -1,15 +1,26 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <title>MyShip</title>
-  <rect width="64" height="64" rx="15" fill="#203A50"/>
-  <path fill="#FFF3E3" d="M9 45C9 30 20 20 32 21C45 21 55 34 55 47C55 56 45 59 32 59C19 59 9 55 9 45Z"/>
-  <g transform="translate(40 24) scale(.7) translate(-40 -24)">
-  <path fill="#FFF8ED" d="M29 15L42 5L49 21Z"/>
-  <path fill="#FFD0B5" d="M42 5L49 21L39 17Z"/>
-  <path fill="#F39A78" d="M26 10L39 17L55 20L46 29L28 23Z"/>
+  <defs>
+    <linearGradient id="fav-bg" x1="0.15" y1="0.05" x2="0.85" y2="0.95">
+      <stop offset="0%" stop-color="#5693BE"/>
+      <stop offset="100%" stop-color="#3B729C"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="15" fill="url(#fav-bg)"/>
+  <path fill="#FFF9F0" d="M9 46C9 30 20 20 32 21C45 21 55 34 55 47C55 56 45 59 32 59C19 59 9 55 9 46Z"/>
+  <g transform="translate(40 23) scale(.72) translate(-40 -23)">
+    <path fill="#FFF6EC" d="M29 15L42 5L49 21Z"/>
+    <path fill="#FFD2B8" d="M42 5L49 21L39 17Z"/>
+    <path fill="#F38D68" d="M26 10L39 17L55 20L46 29L28 23Z"/>
   </g>
-  <g fill="#303537">
-    <ellipse cx="24" cy="39" rx="2.8" ry="3.8"/>
-    <ellipse cx="42" cy="42" rx="2.8" ry="3.8"/>
+  <g fill="#2C3135">
+    <ellipse cx="23.5" cy="39" rx="2.8" ry="3.9" transform="rotate(12 23.5 39)"/>
+    <ellipse cx="41.5" cy="42" rx="2.8" ry="3.9" transform="rotate(12 41.5 42)"/>
+    <ellipse cx="32.5" cy="41.5" rx="2.2" ry="1.6" transform="rotate(10 32.5 41.5)"/>
   </g>
-  <path d="M29 47Q33 51 37 48" fill="none" stroke="#303537" stroke-width="2.6" stroke-linecap="round"/>
+  <path d="M28.5 46.5Q32.5 50.5 36.8 47.5" fill="none" stroke="#2C3135" stroke-width="2.5" stroke-linecap="round"/>
+  <g fill="#FFAE90">
+    <ellipse cx="17.5" cy="44" rx="3.6" ry="2.6" transform="rotate(10 17.5 44)"/>
+    <ellipse cx="46.5" cy="48" rx="3.6" ry="2.6" transform="rotate(10 46.5 48)"/>
+  </g>
 </svg>
