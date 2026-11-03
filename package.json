@@ -1,6 +1,6 @@
 {
   "name": "@myship/cli",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "license": "MIT",
   "type": "module",
   "description": "Self-hosted BYOC full-stack & CAS deployment engine (Vercel + surge.sh on your own Tencent Cloud EdgeOne, COS & SCF)",
@@ -43,6 +43,7 @@
   "scripts": {
     "test": "node --test packages/cli/test/*.test.mjs",
     "demo": "pnpm --filter @myship/cas-sandbox test:local",
+    "demo:fullstack": "pnpm --filter @myship/fullstack-starter test:local",
     "demo:cloud": "pnpm --filter @myship/cas-sandbox demo:cloud",
     "build:site": "pnpm --filter @myship/site build",
     "ship": "node packages/cli/myship.mjs",

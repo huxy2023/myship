@@ -1,0 +1,21 @@
+{
+  "project": "fullstack-starter",
+  "dir": "./public",
+  "prodDomain": "fullstack-starter",
+  "backend": {
+    "enabled": true,
+    "provider": "scf",
+    "entry": "server/index.mjs",
+    "prefix": "/api"
+  },
+  "resources": {
+    "storage": {
+      "enabled": true,
+      "provider": "cos",
+      "env": "prod",
+      "isolation": "shared",
+      "dataPrefix": "data/fullstack-starter/",
+      "filesPrefix": "files/fullstack-starter/"
+    }
+  }
+}

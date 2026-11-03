@@ -1,7 +1,7 @@
-# CAS 三级指针架构原理与成本拆解 (CAS Architecture Deep Dive)
+# CAS 三级指针架构与全栈运行时原理 (CAS & Full-Stack Architecture)
 
-为什么传统的静态站点托管服务大多限制历史版本数量（例如只保留最近 10 次构建），而且切换版本或回滚需要几十秒甚至几分钟？  
-本章深入拆解 **MyShip** 如何借鉴 Git 与 Docker 镜像层的思想，用 **三级解耦指针架构** 实现**“无限历史版本保留 + 0 毫秒原子切流”**。
+为什么传统的站点托管服务大多限制历史版本数量（例如只保留最近 10 次构建），而且切换版本或回滚需要几十秒甚至几分钟，甚至在回滚时出现“前端页面已回退、后端接口还是新版”的版本错位？
+本章深入拆解 **MyShip** 如何借鉴 Git 与 Docker 镜像层的思想，用 **三级解耦指针架构** 实现**“无限静态版本保留 + 前后端同帧不可变绑定 + 0 毫秒原子切流”**。
 
 ---
 
@@ -10,103 +10,95 @@
 ### 1. 传统托管平台的瓶颈
 传统平台在每次部署时，通常将构建产物整包上传并复制到 `/deployments/dpl_xxx/` 或直接覆盖 `/prod/` 目录：
 - **存储膨胀快**：假设你的前端项目包含 5MB 的公共 JS/字体/图片，哪怕每次只改了 1 行文案，发布 100 次就会占用 500MB 存储。因此平台不得不强制清理早期版本。
-- **切流与回滚慢**：回滚时需要重新复制文件或重新触发构建流水线，存在明显的生效延迟与中间态风险。
+- **切流与回滚慢且易错位**：回滚时需要重新复制文件或重新触发构建流水线，且后端云函数往往只存在单一 `$LATEST` 实例，导致前后端版本脱节。
 
-### 2. MyShip 的三级解耦寻址流程（前后端边缘函数 100% 职责分离）
+### 2. MyShip 的三级解耦寻址流程（前后端同帧锁定）
 
 ```mermaid
 flowchart LR
     Req["浏览器请求<br/>https://app1-v2.ship.example.com/*"] --> EO["腾讯云 EdgeOne 触发规则引擎"]
-    EO -- "Rule 1 (高优): /api/*" --> ApiWorker["独立统一 API 边缘函数<br/>(多项目 SHA-256 路由隔离)"]
-    EO -- "Rule 2 (兜底): 静态路径" --> CasRouter["纯净全局静态 CAS 路由器<br/>(myship-cas-router)"]
+    EO -- "Rule 1 (高优): 后端路由 /api/*" --> ApiWorker["项目专属 API 边缘网关<br/>(myship-api-app1)"]
+    EO -- "Rule 2 (兜底): 静态路径" --> CasRouter["全局静态 CAS 路由器<br/>(myship-cas-router)"]
     ApiWorker & CasRouter -- "1. 解析子域名指针 (SWR)" --> Alias["COS: aliases/app1-v2.json<br/>{ deploymentId: 'dpl_4f788e9d' }"]
-    Alias -- "2. 定位全栈快照清单" --> Manifest["COS: manifests/dpl_4f788e9d.json<br/>{ files: {...}, functions: {...} }"]
-    Manifest -- "3a. 方案 A: 边缘 V8 (0ms)" --> V8Fn["SHA-256 预编译函数池<br/>PRECOMPILED_FN_REGISTRY[sha256]"]
-    Manifest -- "3b. 方案 C: 重算力代理" --> ScfUrl["腾讯云 SCF 函数 URL<br/>(fnEntry.upstreamUrl)"]
+    Alias -- "2. 定位全栈快照清单" --> Manifest["COS: manifests/dpl_4f788e9d.json<br/>{ files, functions, backend }"]
+    Manifest -- "3a. 边缘 V8 函数 (0ms)" --> V8Fn["SHA-256 预编译函数池<br/>PRECOMPILED_FN_REGISTRY[sha256]"]
+    Manifest -- "3b. SCF 全栈不可变版本" --> ScfUrl["腾讯云 SCF Web 函数专属版本触发器<br/>(manifest.backend.upstreamUrl)"]
     Manifest -- "3c. 命中静态文件块" --> Blob["边缘 BLOB_CACHE (8MB) /<br/>COS: blobs/<sha256>"]
 ```
 
 ---
 
-## 二、COS 存储桶内的三大核心命名空间
+## 二、COS 存储桶内的六大核心命名空间
 
-在你的腾讯云 COS 存储桶中，所有数据被严格划分为三个正交目录：
+在你的腾讯云 COS 存储桶中，公开静态寻址数据与项目私有业务数据通过对象级 ACL 与路径前缀严格隔离：
 
-### 1. `blobs/<sha256>`（全局内容寻址去重池 · 永久不可变）
-- 存放所有文件去掉文件名后的原始字节流，直接以文件内容的 `SHA-256` 哈希值命名。
-- 在执行 `myship` 部署时，CLI 对本地每个文件计算 `SHA-256`，并发起 `HEAD /blobs/<sha256>` 探测：
-  - **若返回 `200 OK`**：说明该文件块已在云端存在，**0 字节直接跳过上传**！
-  - **若返回 `404`**：仅上传真正发生变化的增量文件块。
-- 无论你手头有 10 个项目还是发布了 1,000 个版本，相同的公共依赖库、图标、字体在 COS 里永远只有 1 份。
+| 命名空间路径 | 访问权限 (`x-cos-acl`) | 生命周期 | 核心职责说明 |
+| :--- | :---: | :---: | :--- |
+| **`blobs/<sha256>`** | `public-read` | 永久不可变 | 全局内容寻址去重池，跨版本、跨项目共享相同文件块，未改动文件 `HEAD` 命中 0 字节秒跳 |
+| **`manifests/dpl_<id>.json`** | `public-read` | 不可变快照 | 记录单次构建的前端文件树 (`files`)、边缘函数哈希 (`functions`) 与 SCF 全栈后端版本 (`backend`) |
+| **`aliases/<subdomain>.json`** | `public-read` | 80B 动态指针 | 将任意子域名映射到指定的 `dpl_<id>`，改写即刻完成全球 0 秒切流或回滚 |
+| **`envs/<project>.json`** | `private` | 项目级可变 | 私有存储当前项目的环境变量与 `myship use` 数据库连接凭证 |
+| **`data/<project>/<key>.json`** | `private` | 独立持久化 | `context.storage` JSON 键值状态存储（代码回滚时绝不回滚或清空业务数据） |
+| **`files/<project>/<key>`** | `private` | 独立持久化 | `context.files` 二进制对象存储池，支持服务端读写与前端预签名直传 (`presignUrl`) |
 
-### 2. `manifests/dpl_<id>.json`（全栈构建快照清单 · 永久不可变）
-- 记录某一次构建所属的项目命名空间（`project`）、前端静态文件树（`files`）与后端 Serverless 云函数路由表（`functions`），以及每个路径对应的 `sha256` 内容哈希：
-  ```json
-  {
-    "id": "dpl_4f788e9d",
-    "project": "app1",
-    "immutableSubdomain": "app1-4f788e9d",
-    "createdAt": "2026-10-29T05:36:31.465Z",
-    "stats": {
-      "totalFiles": 12,
-      "uploadedBlobs": 1,
-      "reusedBlobs": 11,
-      "totalFunctions": 1,
-      "uploadedFunctions": 1,
-      "reusedFunctions": 0
+### 1. `manifests/dpl_<id>.json`（前后端一体的全栈快照清单）
+每次执行 `myship` 发布时，生成的 `manifest` 同时锁定前端静态资源、边缘函数与 SCF 全栈后端的不可变版本号：
+
+```json
+{
+  "id": "dpl_4f788e9d",
+  "project": "app1",
+  "immutableSubdomain": "app1-4f788e9d",
+  "createdAt": "2026-11-03T08:00:00.000Z",
+  "spaFallback": "/index.html",
+  "files": {
+    "/assets/vendor.js": {
+      "sha256": "6f3ffee9d9...",
+      "size": 142050,
+      "contentType": "application/javascript; charset=UTF-8"
     },
-    "spaFallback": "/index.html",
-    "files": {
-      "/assets/vendor.js": {
-        "sha256": "6f3ffee9d9...",
-        "size": 142050,
-        "contentType": "application/javascript; charset=UTF-8"
-      },
-      "/index.html": {
-        "sha256": "5adc23fa1d...",
-        "size": 2194,
-        "contentType": "text/html; charset=UTF-8"
-      }
-    },
-    "functions": {
-      "/api/hello": {
-        "sha256": "36908c5530bc8c08...",
-        "entryFile": "api/hello.js",
-        "runtime": "edge-js",
-        "size": 412
-      }
+    "/index.html": {
+      "sha256": "5adc23fa1d...",
+      "size": 2194,
+      "contentType": "text/html; charset=UTF-8"
     }
+  },
+  "functions": {
+    "/api/hello": {
+      "sha256": "36908c5530bc8c08...",
+      "entryFile": "api/hello.js",
+      "runtime": "edge-js"
+    }
+  },
+  "backend": {
+    "mode": "scf-web",
+    "functionName": "myship-app1",
+    "version": "3",
+    "upstreamUrl": "https://xxx.ap-guangzhou.tencentscf.com",
+    "bundleSha256": "9a8b7c6d..."
   }
-  ```
-- **为什么能保留无限个历史版本？** 因为每个构建快照清单只是一个约 `1KB` 的 JSON 文件！保留 10,000 个历史构建清单仅占约 `10MB` 空间，成本几乎为零。
-- **为什么前后端能做到 0 秒同帧回滚？** 因为 `functions` 的代码同样以 `sha256` 唯一索引预置在边缘 V8 引擎与 `blobs/<sha256>` 池中。子域名指针切换时，前端静态页面与后端 `/api/*` 云函数通过同一份 `manifest` 自动锁定对应版本的 `sha256`，绝不串版本！
+}
+```
 
-### 3. `aliases/<subdomain>.json`（动态域名路由指针表 · 极小可变）
-- 每个子域名对应一个仅约 `80 字节` 的轻量指针文件：
-  ```json
-  {
-    "subdomain": "app1",
-    "project": "app1",
-    "deploymentId": "dpl_4f788e9d",
-    "updatedAt": "2026-10-29T05:36:32.100Z"
-  }
-  ```
-- **为什么切流和回滚是 0 秒？**
-  当你执行 `myship rollback` 或 `myship alias v2 dpl_6e46ed99` 时，根本不需要搬运任何静态文件，只需用 50ms 改写这 80 字节的 JSON。由于边缘函数对 `aliases/` 采用 `no-cache` 实时读取，全球访问该子域名的下一秒请求即刻命中目标版本！
+- **为什么前后端能做到 0 秒同帧回滚？**
+  - 在边缘 V8 模式下，`manifest.functions` 锁定了函数代码的 `sha256`；
+  - 在 SCF 全栈 Node.js 模式下，每次部署都会调用腾讯云 SCF `PublishVersion` 冻结一个不可变版本（如 `Version 3`）并绑定专属触发器 URL 写入 `manifest.backend.upstreamUrl`。
+  - 当执行 `myship rollback` 改写 `aliases/app1.json` 指针时，前端 HTML 与后端接口在同一毫秒内切换回旧版 `manifest` 所指向的静态块与后端版本，彻底杜绝前后端版本错配。
 
 ---
 
-## 三、SPA History 路由与缓存控制策略
+## 三、本地与云端 100% 同构的全栈与数据库运行时
 
-### 1. 原生支持 Vue / React History 路由模式
-许多前端单页应用（SPA）开启了 `HTML5 History` 路由（如访问 `/users/profile`）。在 `MyShip` 中：
-1. 若请求路径精确命中 `manifest.files[reqPath]`（如 `/assets/app.js`），直接返回对应文件块；
-2. 若未命中且请求路径不含文件扩展名（如 `/users/profile`），边缘网关会自动回退读取构建产物中的 `/200.html` 或 `/index.html`，让前端路由无缝接管，绝不会出现刷新页面报 `404` 的问题。
+为了消除“本地 `myship dev` 能跑、上云 SCF 报错”的环境割裂，`MyShip` 在底层工程架构上实现了本地开发与云端 SCF 容器 **100% 共享同一套运行时核心模块**：
 
-### 2. 智能分级缓存头 (`Cache-Control`)、V8 内存加速与流式分片 (`Range 206`)
-- **三级 V8 Isolate 内存缓存**：
-  - `MANIFEST_CACHE`：由于 `manifests/dpl_<id>.json` 永久不可变，首次读取后常驻边缘节点 V8 内存（0ms 命中）。
-  - `BLOB_CACHE`：对 `<= 256 KB` 的高频静态文件（如 `index.html`、图标、核心脚本）采用 `Uint8Array` 零拷贝视图驻留内存，并严格受 **`8 MB` 总字节账本**保护（远低于 EdgeOne `128 MB` 内存红线）。
-  - `ALIAS_CACHE`（SWR 异步刷新）：子域名指针在内存中提供毫秒级响应，同时利用 `event.waitUntil()` 在后台异步刷新。
-- **ETag 条件请求 (`304 Not Modified`)**：天然复用文件的 `SHA-256` 哈希作为强 `ETag`，浏览器二次刷新时在边缘直接返回 `304`，0 字节回源。
-- **大文件与 `<video>` 流式分片 (`HTTP 206 Partial Content`)**：自动向 COS 透传 `Range` 请求头并返回 `206 Partial Content` 与 `Content-Range`，实现高清长视频进度条任意拖拽秒开。
+1. **统一多引擎数据库客户端 (`packages/cli/db-client.mjs`)**：
+   - 本地开发 (`myship dev`) 与云端 SCF 引导层 (`scf-bootstrap-runtime.mjs`) 共同复用同一个 `createDatabaseClient` 实现（统一暴露 `query(sql, params)`、`execute(sql, params)`、`batch(statements)` 方法，SQL 方言遵循对应底层数据库引擎）：
+     - **SQLite (`node:sqlite` / Turso / Cloudflare D1)**：当未绑定远端数据库或使用 SQLite 体系时，本地开发默认使用 Node.js 22+ 内置 `node:sqlite` 读写 `.myship/data/<project>/local.sqlite`（设置 `MYSHIP_DB_REMOTE=1` 可在本地直连远端）；云端通过 HTTP Pipeline 协议直连 Turso 或 Cloudflare D1。
+     - **PostgreSQL (CloudBase PG / Neon / 原生 PG)**：本地与云端均直连目标 PG / Neon 实例，支持标准 `pg.Pool` 连接池复用（自动包裹事务级 `SET LOCAL search_path TO "myship_<project>", public` 兼容 PgBouncer `-pooler.` 连接池）、Neon HTTP SQL 零冷启动驱动以及 CloudBase `ExecutePGSql` 管控面兜底。
+     - **MySQL (原生 MySQL 8 / TDSQL-C)**：本地与云端均基于 `mysql2/promise` 连接池直连并隔离至 `myship_<project>` 独立库。
+2. **统一存储与请求派发器 (`packages/cli/storage-client.mjs`)**：
+   - 统一封装 `context.storage`（JSON KV）与 `context.files`（二进制文件读写 + COS XML v5 预签名 URL 生成），以及兼容 Web Standard `fetch(request, context)`、Hono `app.fetch` 与 `GET/POST` 命名导出的模块派发器。
+3. **SPA History 路由与三级边缘 V8 内存缓存**：
+   - `MANIFEST_CACHE`：不可变清单首次读取后常驻边缘 V8 内存（0ms 命中）。
+   - `BLOB_CACHE`：对 `<= 256 KB` 的高频静态文件采用 `Uint8Array` 零拷贝视图驻留内存，受 **`8 MB` 总字节账本**保护。
+   - `ALIAS_CACHE`（SWR 异步刷新）：子域名指针在边缘内存极速响应，并利用 `event.waitUntil()` 后台异步刷新，兼顾 0ms 延迟与实时切流。

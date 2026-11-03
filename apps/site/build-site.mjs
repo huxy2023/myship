@@ -30,7 +30,7 @@ const DOC_SOURCES = [
     shortTitle: '5 分钟快速上手',
     badge: 'Quickstart',
     description:
-      '涵盖免云账号本地沙盒体验、全局安装、myship login、.myship/project.json 多项目命名空间隔离、myship ls 与 0 秒回滚。',
+      '涵盖全局安装、myship login、多项目命名空间隔离、边缘与 SCF 全栈后端、myship use 声明式数据库与文件存储、0 秒回滚。',
     filePath: resolve(ROOT_DIR, 'docs/01-quickstart.md'),
     rawPath: '/raw/01-quickstart.md',
   },
@@ -41,29 +41,29 @@ const DOC_SOURCES = [
     shortTitle: '自建云端底座指南',
     badge: 'BYOC Guide',
     description:
-      '一步步指导你在 10 分钟内用自己的腾讯云 COS、DNSPod 与 EdgeOne 标准站点搭建专属部署平台，含泛域名免费 HTTPS 证书避坑指南。',
+      '一步步指导你在 10 分钟内用自己的腾讯云 COS、DNSPod、EdgeOne 标准站点与 Serverless 数据库搭建专属全栈平台。',
     filePath: resolve(ROOT_DIR, 'docs/02-self-hosting-guide.md'),
     rawPath: '/raw/02-self-hosting-guide.md',
   },
   {
     id: 'architecture',
     category: '架构深度 · Architecture',
-    title: 'CAS 三级指针架构原理与成本拆解',
-    shortTitle: 'CAS 架构原理拆解',
+    title: 'CAS 三级指针架构与全栈运行时原理',
+    shortTitle: 'CAS 与全栈架构原理',
     badge: 'Architecture',
     description:
-      '深度对比传统目录覆盖模型与 CAS 内容寻址 + 动态指针模型，剖析 blobs / manifests / aliases 如何实现无限版本保留与 0 秒切流。',
+      '深度剖析 blobs / manifests / aliases / data / files 六大命名空间、SCF 不可变版本绑定以及本地与云端 100% 同构的数据库运行时。',
     filePath: resolve(ROOT_DIR, 'docs/03-architecture.md'),
     rawPath: '/raw/03-architecture.md',
   },
   {
     id: 'roadmap',
-    category: '产品规划 · Vision & Roadmap',
-    title: '产品愿景与极致 DX 演进路线图',
-    shortTitle: '愿景与演进路线图',
-    badge: 'Roadmap',
+    category: '产品规划 · Vision & Architecture',
+    title: '产品愿景与极致 DX 演进蓝图',
+    shortTitle: '愿景与演进蓝图',
+    badge: 'Blueprint',
     description:
-      '定义 MyShip 的三大 DX 黄金准则，以及约定式 Serverless 云函数 (api/*.js)、前后端原子切换与 CAS 垃圾回收演进规划。',
+      '定义 MyShip 的三大 DX 黄金准则与五大工程支柱：CAS 去重、边缘 V8、SCF 全栈 Node.js、myship use 云资源编排与权限演进。',
     filePath: resolve(ROOT_DIR, 'docs/04-roadmap.md'),
     rawPath: '/raw/04-roadmap.md',
   },
@@ -345,9 +345,9 @@ function buildAll() {
     }
   }
 
-  const llmsTxt = `# MyShip — 基于自有云设施 (BYOC) 的高 DX 部署与泛域名路由引擎
+  const llmsTxt = `# MyShip — 基于自有云设施 (BYOC) 的高 DX 全栈部署、泛域名路由与云资源编排引擎
 
-> MyShip 是融合 surge.sh（极简 CLI）与 Vercel（不可变多版本预览、项目级命名空间隔离、0 秒原子回滚）的开源 BYOC 部署引擎。基于腾讯云 EdgeOne 标准站点（泛域名 *.ship.example.com + 边缘函数）与 COS 内容寻址存储（CAS）构建。
+> MyShip 是融合 surge.sh（极简 CLI）与 Vercel（不可变多版本预览、项目级命名空间隔离、边缘与 SCF 全栈后端、声明式数据库与文件存储、0 秒原子回滚）的开源 BYOC 平台。基于腾讯云 EdgeOne 标准站点（泛域名 *.ship.example.com + 边缘函数）、COS 内容寻址存储（CAS）、SCF Web 函数与五大 Serverless 数据库（CloudBase PG / Neon / Turso / D1 / MySQL）构建。
 
 ## 核心文档索引 (Documentation)
 
@@ -357,14 +357,18 @@ ${parsedDocs.map((d) => `- [${d.title}](https://myship.ship.onehub.top${d.rawPat
 
 - 全局安装: \`npm i -g @myship/cli\`
 - 交互式登录与绑定自有云底座 (含 CAM 最小权限指引 / tccli 扫码 + 自动探测网关): \`myship login\`
-- 一键生成并自动上传全局 EdgeOne 边缘函数代码 (~/.myship/edgeone-function.dist.js): \`myship setup-edge\`
-- 本地全栈即时开发服务器 (免打包实时加载静态页、api/*.js 与 .env): \`myship dev\`
+- 一键同步全局 EdgeOne 边缘函数代码 (~/.myship/edgeone-function.dist.js): \`myship setup-edge\`
+- 本地全栈即时开发服务器 (热重载静态页、api/*.js、SCF 后端与本地 node:sqlite): \`myship dev\`
 - 零参数智能发布 (自动识别 .myship/project.json): \`myship\`
 - 发布指定子环境: \`myship -d v2\` 或 \`myship ./dist v2\`
-- 管理项目云函数环境变量 (COS 私有存储 + 边缘热更新): \`myship env <set|ls|rm|import|pull>\`
+- 交互式声明并注入对象文件存储与五大数据库 (PG / Neon / Turso / D1 / MySQL): \`myship use\`
+- 开启腾讯云 SCF Node.js 全栈后端 (esbuild 内联 SourceMap + 不可变版本冻结): \`myship backend enable\`
+- 查询云端全栈运行日志与真实源码报错行号: \`myship logs [--error]\`
+- 管理项目私有环境变量 (COS 私有存储，边缘 api/*.js 自动热更新，SCF 全栈后端需重新执行 myship 发布新版本生效): \`myship env <set|ls|rm|import|pull>\`
 - 查看当前项目版本与域名: \`myship ls\` (全局按项目分组: \`myship ls --all\`)
-- 0 秒一键回滚主域名: \`myship rollback\`
-- CAS 垃圾回收与 API 路由配额释放: \`myship gc\` (预览: \`myship gc --dry-run\`)
+- 0 秒一键回滚主域名 (前后端同帧回退): \`myship rollback\`
+- CAS 垃圾回收与精确资源销毁: \`myship gc [--keep N | --older-than 7d]\` / \`myship rm <dpl_id | --alias | --project>\`
+- 启动本机 127.0.0.1:4200 可视化 Web 管控台: \`myship console\`
 `;
   writeFileSync(resolve(DIST_DIR, 'llms.txt'), llmsTxt, 'utf-8');
 
@@ -1048,14 +1052,14 @@ function generateSiteHtml(parsedDocs, searchEntries, mcpConfig) {
       <div class="hero-grid">
         <div>
           <div class="eyebrow">
-            <span>⚡ BYOC 自有云设施 · EdgeOne 泛域名网关 + 腾讯云 COS 内容寻址</span>
+            <span>⚡ BYOC 自有云设施 · EdgeOne 泛域名网关 + COS 内容寻址 + 声明式全栈编排</span>
           </div>
           <h1 class="hero-title">
             用你自己的云设施，<br/>
             <span>10 分钟搭一套私人 Vercel + Surge。</span>
           </h1>
           <p class="hero-desc">
-            <strong>MyShip</strong> 是零外部依赖的开源 CAS 部署引擎。通过 <code>.myship/project.json</code> 自动隔离多项目命名空间，支持无限历史版本保留、SHA-256 块级去重与 0 秒原子回滚。
+            <strong>MyShip</strong> 是开源 BYOC 全栈部署与资源编排引擎。通过 <code>.myship/project.json</code> 自动隔离多项目命名空间，支持 SHA-256 块级去重、边缘与 SCF 双引擎后端、<code>myship use</code> 一键接入五大数据库及 0 秒原子回滚。
           </p>
           <div class="hero-actions">
             <button type="button" class="btn-primary" data-switch-doc="self-hosting">
@@ -1080,8 +1084,8 @@ function generateSiteHtml(parsedDocs, searchEntries, mcpConfig) {
             </div>
             <div class="terminal-tabs">
               <button type="button" class="term-tab active" data-term-tab="deploy">1. 零参数发布</button>
-              <button type="button" class="term-tab" data-term-tab="serverless">2. 全栈云函数</button>
-              <button type="button" class="term-tab" data-term-tab="namespace">3. 命名空间</button>
+              <button type="button" class="term-tab" data-term-tab="use">2. 声明式数据库</button>
+              <button type="button" class="term-tab" data-term-tab="serverless">3. 全栈云函数</button>
               <button type="button" class="term-tab" data-term-tab="rollback">4. 0秒原子回滚</button>
             </div>
           </div>
@@ -1094,24 +1098,24 @@ function generateSiteHtml(parsedDocs, searchEntries, mcpConfig) {
       <div class="stats-grid">
         <div class="stat-card">
           <div class="stat-val">0 ms</div>
-          <div class="stat-label">域名指针原子切流与一键回滚（仅改写 80B JSON）</div>
+          <div class="stat-label">前后端同帧原子切流与一键回滚（仅改写 80B JSON）</div>
         </div>
         <div class="stat-card">
           <div class="stat-val">SHA-256</div>
           <div class="stat-label">跨版本、跨项目全局内容寻址去重存储池</div>
         </div>
         <div class="stat-card">
-          <div class="stat-val">∞ 版本</div>
-          <div class="stat-label">突破标准 Pages 10 个版本上限，所有构建永久可访问</div>
+          <div class="stat-val">5 大数据库</div>
+          <div class="stat-label">myship use 交互式开通 CloudBase PG / Neon / Turso / D1 / MySQL</div>
         </div>
         <div class="stat-card">
-          <div class="stat-val">0 依赖</div>
-          <div class="stat-label">纯 Node.js 原生实现，100% 掌控在自己的云账号下</div>
+          <div class="stat-val">100% BYOC</div>
+          <div class="stat-label">零平台固定月租，域名、存储、函数与数据库完全归属自己</div>
         </div>
       </div>
 
       <div class="section-head" style="margin-top: 12px;">
-        <h2>⚡ 在线实测：Phase 2 约定式边缘 Serverless 云函数 (<code>api/*.js</code>)</h2>
+        <h2>⚡ 在线实测：约定式边缘 Serverless 云函数 (<code>api/*.js</code>)</h2>
         <p>本门户站已内置 2 个云函数（Web 标准签名的 <code>api/hello.js</code> 与 EdgeOne 官方 <code>onRequestGet</code> + Web Crypto 签名的 <code>api/inspect.js</code>），点击下方按钮直接发起真实边缘请求：</p>
       </div>
 
@@ -1138,8 +1142,8 @@ function generateSiteHtml(parsedDocs, searchEntries, mcpConfig) {
       </div>
 
       <div class="section-head" style="margin-top: 48px;">
-        <h2>🎬 MyShip 2026 产品发布与全景愿景大片 (Keynote Video)</h2>
-        <p>由 Remotion 编程级动态图形引擎 + 神经网络中文配音 + 120 BPM 原创电子合成器配乐打造，全景呈现 Phase 0/1 核心架构与 Phase 2/3 远期蓝图。</p>
+        <h2>🎬 MyShip 产品发布与全景架构大片 (Keynote Video)</h2>
+        <p>由 Remotion 编程级动态图形引擎 + 神经网络中文配音 + 120 BPM 原创电子合成器配乐打造，全景呈现 CAS 内容寻址、泛域名路由与全栈 Serverless 架构。</p>
       </div>
 
       <div style="margin: 24px 0 56px; border-radius: 22px; overflow: hidden; border: 1px solid rgba(56, 189, 248, 0.35); background: rgba(7, 11, 22, 0.9); box-shadow: 0 28px 70px rgba(0, 0, 0, 0.55), 0 0 40px rgba(56, 189, 248, 0.14);">
@@ -1160,19 +1164,19 @@ function generateSiteHtml(parsedDocs, searchEntries, mcpConfig) {
       <div class="feature-grid">
         <div class="feature-card" data-switch-doc="quickstart">
           <h3>📘 5 分钟快速上手</h3>
-          <p>免云账号本地沙盒体验、全局安装、.myship 项目命名空间隔离与日常极简命令。</p>
+          <p>涵盖全局安装、多项目命名空间隔离、边缘与 SCF 全栈后端、myship use 声明式数据库与 0 秒回滚。</p>
         </div>
         <div class="feature-card" data-switch-doc="self-hosting">
           <h3>🛠️ 自建云端底座指南</h3>
-          <p>10 分钟完成 COS、DNSPod 与 EdgeOne 配置，含泛域名免费 HTTPS 证书避坑指南。</p>
+          <p>10 分钟完成 COS、DNSPod、EdgeOne 与 Serverless 数据库配置，含泛域名免费 HTTPS 证书避坑指南。</p>
         </div>
         <div class="feature-card" data-switch-doc="architecture">
-          <h3>🏗️ CAS 架构原理拆解</h3>
-          <p>深入剖析 blobs / manifests / aliases 三级解耦寻址流程与 SPA History 路由支持。</p>
+          <h3>🏗️ CAS 与全栈架构原理</h3>
+          <p>深入剖析六大 COS 命名空间、SCF 不可变版本绑定以及本地与云端 100% 同构的数据库运行时。</p>
         </div>
         <div class="feature-card" data-switch-doc="roadmap">
-          <h3>🧭 愿景与演进路线图</h3>
-          <p>三大 DX 黄金准则、约定式 Serverless 云函数 (api/*.js) 与前后端原子切流规划。</p>
+          <h3>🧭 愿景与演进蓝图</h3>
+          <p>三大 DX 黄金准则与五大工程支柱：CAS 去重、边缘 V8、SCF 全栈 Node.js 与声明式云资源编排。</p>
         </div>
       </div>
     </div>
@@ -1339,37 +1343,34 @@ function generateSiteHtml(parsedDocs, searchEntries, mcpConfig) {
     }
 
     const TERM_SCENES = {
-      deploy: \`<span class="t-dim"># 在任意全栈项目中直接输入 6 个字母 (自动扫描静态产物 + api/*.js):</span>
+      deploy: \`<span class="t-dim"># 在任意全栈项目中直接输入 6 个字母 (自动扫描静态产物 + api/*.js / SCF 后端):</span>
 <span class="t-cmd">$ myship</span>
 📁 已自动读取项目命名空间配置: .myship/project.json [项目: app1]
 ☁️  正在向腾讯云 COS 执行 CAS 去重部署... [项目命名空间: app1]
   ⚡ [COS CAS 命中跳过] /assets/vendor.js (sha256: 6f3ffee9d9...)
   ⬆️ [COS 新块上传]     /index.html -> blobs/5adc23fa1d... (2,194 B)
-  ⚡ [EdgeOne 独立云函数同步] 已部署至独立边缘函数: myship-api-app1 (ef-ti42dfy0)
+  ⚡ [EdgeOne 独立云函数同步] 已部署至独立边缘函数: myship-api-app1
 
 <span class="t-ok">✅ 云端部署完成! [项目: app1] Deployment ID: dpl_6e46ed99</span>
    🌐 构建快照域名: <span class="t-url">https://app1-6e46ed99.ship.example.com</span>
-   🌐 项目默认主域: <span class="t-url">https://app1.ship.example.com</span>
-   ⚡ 边缘函数路由: <span class="t-url">https://app1.ship.example.com/api/hello</span>\`,
-      serverless: \`<span class="t-dim"># 独立统一 API 边缘函数按子域名快照精确寻址 /api/*，多项目同名路由互不串线:</span>
+   🌐 项目默认主域: <span class="t-url">https://app1.ship.example.com</span>\`,
+      use: \`<span class="t-dim"># 交互式一行命令为项目开通并注入云数据库 (CloudBase PG / Neon / Turso / D1 / MySQL):</span>
+<span class="t-cmd">$ myship use</span>
+✔ 请选择要为项目 [app1] 接入的云资源类型: 🗄️  数据库 (Database -> context.db)
+✔ 请选择数据库引擎: 🐘 Neon (Serverless PostgreSQL · 零月租自动休眠)
+<span class="t-ok">✅ 已通过 Neon HTTP SQL 实连校验并确保 Schema 存在: myship_app1</span>
+<span class="t-ok">✅ 已为项目 [app1] 注册并注入数据库资源 (context.db &amp; DATABASE_URL)</span>\`,
+      serverless: \`<span class="t-dim"># 边缘 V8 与 SCF 全栈后端按子域名快照精确寻址，多项目同名路由互不串线:</span>
 <span class="t-cmd">$ curl -i https://app1.ship.example.com/api/hello</span>
 HTTP/2 200 
 content-type: application/json; charset=UTF-8
-x-myship-engine: EdgeOne-API-Worker/2.1-SchemeA
+x-myship-engine: EdgeOne-API-Worker/2.2-FullStack
 x-myship-function-worker: myship-api-app1
 x-myship-deployment-id: dpl_6e46ed99
 x-myship-function-route: /api/hello
-x-myship-function-sha256: 36908c55
 
-<span class="t-ok">{"ok":true,"version":"v1","deploymentId":"dpl_6e46ed99","route":"/api/hello"}</span>\`,
-      namespace: \`<span class="t-dim"># 在 app1 目录下执行 myship ls，默认仅展示当前项目的版本与正式域名映射:</span>
-<span class="t-cmd">$ myship ls</span>
-=== 📦 当前项目命名空间: [app1] (云端全局 CAS 唯一块: 6 个) ===
-
-=== 🌐 [app1] 线上子域名路由映射表 (2 个) ===
-  - <span class="t-url">https://app1.ship.example.com</span>    -->  dpl_6e46ed99
-  - <span class="t-url">https://app1-v2.ship.example.com</span> -->  dpl_4f788e9d\`,
-      rollback: \`<span class="t-dim"># 线上发现问题？无需重新构建，0 秒把项目主域名回退到上一版:</span>
+<span class="t-ok">{"ok":true,"deploymentId":"dpl_6e46ed99","route":"/api/hello"}</span>\`,
+      rollback: \`<span class="t-dim"># 线上发现问题？无需重新构建，0 秒把项目主域名前后端同帧回退到上一版:</span>
 <span class="t-cmd">$ myship rollback</span>
 ⏪ 正在将 https://app1.ship.example.com 从 dpl_4f788e9d 回滚至上一版本 dpl_6e46ed99...
 <span class="t-ok">🔗 云端域名别名已切换: https://app1.ship.example.com -> dpl_6e46ed99 (全球边缘 0 秒生效)</span>\`

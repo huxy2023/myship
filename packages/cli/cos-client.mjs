@@ -121,15 +121,31 @@ function maskSecret(str) {
   return `${str.slice(0, 4)}****${str.slice(-4)}`;
 }
 
-export function loadTencentCredentials() {
-  // 1. 优先读取环境变量 (CI/CD)
-  const envId = process.env.MYSHIP_SECRET_ID || process.env.TENCENTCLOUD_SECRET_ID;
-  const envKey = process.env.MYSHIP_SECRET_KEY || process.env.TENCENTCLOUD_SECRET_KEY;
+export function loadTencentCredentials(env = process.env) {
+  // 1. 优先读取环境变量 (CI/CD 与云端 SCF 运行时)
+  const envId =
+    env.MYSHIP_DATA_SECRET_ID ||
+    env.MYSHIP_SECRET_ID ||
+    env.TENCENT_SECRET_ID ||
+    env.TENCENTCLOUD_SECRET_ID ||
+    env.TENCENTCLOUD_SECRETID;
+  const envKey =
+    env.MYSHIP_DATA_SECRET_KEY ||
+    env.MYSHIP_SECRET_KEY ||
+    env.TENCENT_SECRET_KEY ||
+    env.TENCENTCLOUD_SECRET_KEY ||
+    env.TENCENTCLOUD_SECRETKEY;
   if (envId && envKey) {
     return {
       secretId: envId,
       secretKey: envKey,
-      token: process.env.MYSHIP_TOKEN || process.env.TENCENTCLOUD_TOKEN || '',
+      token:
+        env.MYSHIP_DATA_TOKEN ||
+        env.MYSHIP_TOKEN ||
+        env.TENCENT_TOKEN ||
+        env.TENCENTCLOUD_TOKEN ||
+        env.TENCENTCLOUD_SESSIONTOKEN ||
+        '',
       source: '环境变量 (ENV)',
     };
   }

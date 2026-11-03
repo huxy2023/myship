@@ -24,8 +24,17 @@ jobs:
         with:
           node-version: 22
 
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run Modular CLI & DB Runtime Test Suites
+        run: pnpm test
+
       - name: Run Local CAS Sandbox End-to-End Tests
         run: pnpm demo
+
+      - name: Run Full-Stack Starter End-to-End Tests
+        run: pnpm demo:fullstack
 
       - name: Verify EdgeOne Function Template Generation
         run: |

@@ -29,8 +29,11 @@ jobs:
           node-version: 22
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Run Pre-Release E2E Verification
-        run: pnpm demo
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run Pre-Release Test Suites & Full-Stack E2E Verification
+        run: pnpm test && pnpm demo && pnpm demo:fullstack
 
       - name: Publish to NPM with Provenance
         run: npm publish --provenance --access public

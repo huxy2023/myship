@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MyShip Full-Stack Starter — 全栈黄金样板工程</title>
+  <style>
+    :root {
+      --bg: #090d16;
+      --card: #111827;
+      --border: #1e293b;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --ok: #34d399;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'PingFang SC', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 36px 20px;
+      line-height: 1.6;
+    }
+    .container { max-width: 960px; margin: 0 auto; }
+    .header { margin-bottom: 28px; padding-bottom: 20px; border-bottom: 1px solid var(--border); }
+    .badge {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--accent);
+      background: rgba(56, 189, 248, 0.12);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      margin-bottom: 10px;
+    }
+    h1 { font-size: 1.85rem; margin-bottom: 6px; }
+    .subtitle { color: var(--muted); font-size: 0.95rem; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 18px; margin-bottom: 24px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .card h2 { font-size: 1.05rem; display: flex; align-items: center; justify-content: space-between; }
+    .card p { font-size: 0.85rem; color: var(--muted); }
+    .row { display: flex; gap: 8px; }
+    input {
+      flex: 1;
+      padding: 8px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #0b101b;
+      color: var(--text);
+      font-size: 0.88rem;
+    }
+    button {
+      padding: 8px 14px;
+      border-radius: 8px;
+      border: none;
+      background: var(--accent);
+      color: #090d16;
+      font-weight: 600;
+      font-size: 0.85rem;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: #1e293b;
+      color: var(--text);
+    }
+    pre {
+      background: #050811;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.8rem;
+      color: var(--ok);
+      overflow-x: auto;
+      min-height: 140px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <span class="badge">⚡ MyShip Full-Stack Starter · SCF Web Function + CAS</span>
+      <h1>MyShip 全栈黄金样板工程</h1>
+      <p class="subtitle">一套代码同时验证：<code>server/index.mjs</code> + <code>context.storage</code> (KV) + <code>context.db</code> (SQL) + <code>context.files</code> (COS 对象存储与预签名直传)</p>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h2><span>1. KV 状态存储</span><code>context.storage</code></h2>
+        <p>云端私有存储于 <code>data/&lt;project&gt;/counter.json</code>，代码回滚不丢状态。</p>
+        <div class="row">
+          <button type="button" id="btn-inc">+1 累加计数器</button>
+          <button type="button" class="secondary" id="btn-state">读取当前值</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2><span>2. 多引擎数据库</span><code>context.db</code></h2>
+        <p>自动适配 PostgreSQL / Neon / Turso / D1 / MySQL 与本地 <code>node:sqlite</code>。</p>
+        <div class="row">
+          <input type="text" id="note-input" placeholder="输入一条数据库笔记..." value="Ship Full-Stack with MyShip!" />
+          <button type="button" id="btn-add-note">写入</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2><span>3. 文件存储与预签名</span><code>context.files</code></h2>
+        <p>按 <code>files/&lt;project&gt;/</code> 路径前缀隔离，支持服务端读写与前端预签名直传。</p>
+        <div class="row">
+          <button type="button" id="btn-put-file">写入 hello.txt</button>
+          <button type="button" class="secondary" id="btn-presign">生成预签名 URL</button>
+        </div>
+      </div>
+    </div>
+
+    <pre id="output">// 正在加载 /api/health 运行时状态...</pre>
+  </div>
+
+  <script>
+    const out = document.getElementById('output');
+    async function callApi(path, options = {}) {
+      out.textContent = `⏳ 请求 ${options.method || 'GET'} ${path} ...`;
+      try {
+        const res = await fetch(path, {
+          headers: { 'Content-Type': 'application/json' },
+          ...options,
+        });
+        const data = await res.json();
+        out.textContent = JSON.stringify(data, null, 2);
+      } catch (err) {
+        out.textContent = '❌ 请求异常: ' + err.message;
+      }
+    }
+
+    document.getElementById('btn-inc').onclick = () =>
+      callApi('/api/state', { method: 'POST', body: JSON.stringify({ delta: 1 }) });
+    document.getElementById('btn-state').onclick = () => callApi('/api/state');
+    document.getElementById('btn-add-note').onclick = () => {
+      const title = document.getElementById('note-input').value;
+      callApi('/api/notes', { method: 'POST', body: JSON.stringify({ title }) });
+    };
+    document.getElementById('btn-put-file').onclick = () =>
+      callApi('/api/files', {
+        method: 'POST',
+        body: JSON.stringify({ key: 'demo/hello.txt', content: 'Hello from MyShip Full-Stack Starter!' }),
+      });
+    document.getElementById('btn-presign').onclick = () =>
+      callApi('/api/files/presign', {
+        method: 'POST',
+        body: JSON.stringify({ key: 'uploads/direct-avatar.png', method: 'PUT' }),
+      });
+
+    callApi('/api/health');
+  </script>
+</body>
+</html>

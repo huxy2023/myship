@@ -1,0 +1,13 @@
+{
+  "name": "@myship/fullstack-starter",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "MyShip Golden Full-Stack Starter (Static + SCF Web Function + context.db + context.storage + context.files)",
+  "scripts": {
+    "dev": "node ../../packages/cli/myship.mjs dev",
+    "ship": "node ../../packages/cli/myship.mjs",
+    "test:local": "node verify-local.mjs"
+  }
+}
