@@ -27,6 +27,7 @@ import {
   maskEnvValue,
   validateEdgeFunctionCompliance,
   createDevRequestHandler,
+  startDevServer,
   parseOlderThanCutoffMs,
   removeResources,
   gcRemoteState,
@@ -42,6 +43,7 @@ import {
   createCloudStorage,
 } from '../myship.mjs';
 import { renderConsoleHtml } from '../console-ui.mjs';
+import { startScfRuntimeServer } from '../scf-bootstrap-runtime.mjs';
 import { handleEdgeRequest } from '../../edge-gateway/local-gateway.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1116,6 +1118,259 @@ test('8. Project scaffolding (`myship init --template static | edge | fullstack`
     const demoCiYaml = readFileSync(join(demoDir, '.github/workflows/myship.yml'), 'utf8');
     assert(demoCiYaml.includes('MYSHIP_DIR: "./public"'));
   } finally {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('myship dev SSE real-time streaming & exact Source Map path without duplicate server/server prefix', async () => {
+  const tmpRoot = mkdtempSync(join(tmpdir(), 'myship-sse-sourcemap-test-'));
+  try {
+    mkdirSync(join(tmpRoot, 'public'), { recursive: true });
+    mkdirSync(join(tmpRoot, 'server'), { recursive: true });
+    writeFileSync(join(tmpRoot, 'public', 'index.html'), '<h1>SSE Test</h1>', 'utf8');
+    writeFileSync(
+      join(tmpRoot, 'server', 'index.mjs'),
+      `export async function fetch(request) {
+  const url = new URL(request.url);
+  if (url.pathname === '/api/crash') {
+    throw new Error('boom-from-line-4');
+  }
+  if (url.pathname === '/api/sse') {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      async start(controller) {
+        controller.enqueue(encoder.encode('data: chunk-1\\n\\n'));
+        await new Promise((r) => setTimeout(r, 180));
+        controller.enqueue(encoder.encode('data: chunk-2\\n\\n'));
+        controller.close();
+      },
+    });
+    return new Response(stream, {
+      status: 200,
+      headers: {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache',
+      },
+    });
+  }
+  return Response.json({ ok: true });
+}
+`,
+      'utf8'
+    );
+
+    // 1. Check inline source map sources array does NOT have duplicate `server/` prefix
+    const bundleRes = await bundleScfBackend({ cwd: tmpRoot, targetDir: join(tmpRoot, 'public') });
+    const smMatch = bundleRes.appBundleCode.match(
+      /sourceMappingURL=data:application\/json;base64,([A-Za-z0-9+/=]+)/
+    );
+    assert(smMatch, 'Should contain inline base64 source map');
+    const smJson = JSON.parse(Buffer.from(smMatch[1], 'base64').toString('utf8'));
+    assert.deepEqual(smJson.sources, ['index.mjs'], 'Source map source relative to server/ must be index.mjs');
+
+    // 2. Check runtime error stack in dev mode resolves to `server/index.mjs:4`, never `server/server/index.mjs`
+    const devServer = await startDevServer({
+      staticDir: join(tmpRoot, 'public'),
+      cwd: tmpRoot,
+      project: 'sse-demo',
+      port: 0,
+      storageDir: join(tmpRoot, '.cas-storage'),
+    });
+    const port = devServer.address().port;
+
+    try {
+      const crashRes = await fetch(`http://127.0.0.1:${port}/api/crash`);
+      assert.equal(crashRes.status, 500);
+      const logFile = join(tmpRoot, '.myship', 'data', 'sse-demo', '__myship_logs.json');
+      const logsDoc = JSON.parse(readFileSync(logFile, 'utf8'));
+      const latestLog = (logsDoc.value || logsDoc)[0];
+      assert(latestLog.stack.includes('server/index.mjs:4'), `Expected server/index.mjs:4 in stack: ${latestLog.stack}`);
+      assert(!latestLog.stack.includes('server/server/index.mjs'), `Must not duplicate server/ prefix: ${latestLog.stack}`);
+
+      // 3. Verify real-time SSE chunk-by-chunk arrival (chunk-1 arrives well before chunk-2)
+      const sseRes = await fetch(`http://127.0.0.1:${port}/api/sse`);
+      assert.equal(sseRes.status, 200);
+      const reader = sseRes.body.getReader();
+      const decoder = new TextDecoder();
+      const chunkTimestamps = [];
+      const chunks = [];
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const text = decoder.decode(value);
+        if (text.trim()) {
+          chunks.push(text.trim());
+          chunkTimestamps.push(Date.now());
+        }
+      }
+      assert.equal(chunks.length, 2, `Should receive 2 distinct SSE chunks, got: ${JSON.stringify(chunks)}`);
+      assert.equal(chunks[0], 'data: chunk-1');
+      assert.equal(chunks[1], 'data: chunk-2');
+      assert(
+        chunkTimestamps[1] - chunkTimestamps[0] >= 100,
+        `SSE chunks must stream progressively over time (delta: ${chunkTimestamps[1] - chunkTimestamps[0]}ms)`
+      );
+    } finally {
+      await new Promise((r) => devServer.close(r));
+    }
+  } finally {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('SCF runtime server dynamically hot-reloads envs/<project>.json on already-published versions without redeploy', async () => {
+  let currentRemoteVars = { HOT_KEY: 'v1-initial', EXTRA_FLAG: 'yes' };
+  const putPaths = [];
+  const mockCosServer = http.createServer((req, res) => {
+    if (req.url.startsWith('/envs/hot-app.json')) {
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.end(JSON.stringify({ project: 'hot-app', vars: currentRemoteVars }));
+      return;
+    }
+    if (req.method === 'PUT' && req.url.startsWith('/data/hot-app/')) {
+      putPaths.push(req.url.split('?')[0]);
+      res.statusCode = 200;
+      res.end('OK');
+      return;
+    }
+    res.statusCode = 404;
+    res.end('Not Found');
+  });
+  await new Promise((r) => mockCosServer.listen(0, '127.0.0.1', r));
+  const cosPort = mockCosServer.address().port;
+
+  const savedEnv = { ...process.env };
+  process.env.PORT = '0';
+  process.env.MYSHIP_PROJECT = 'hot-app';
+  process.env.MYSHIP_GATEWAY_TOKEN = 'msgt_hot_test';
+  process.env.MYSHIP_COS_ORIGIN = `http://127.0.0.1:${cosPort}`;
+  process.env.MYSHIP_DATA_SECRET_ID = 'AKIDhottest';
+  process.env.MYSHIP_DATA_SECRET_KEY = 'SKhottest';
+  process.env.MYSHIP_PROJECT_ENV_KEYS = 'HOT_KEY,BAKED_ONLY_KEY';
+  process.env.HOT_KEY = 'baked-in-v0';
+  process.env.BAKED_ONLY_KEY = 'should-be-deleted-on-cold-start';
+
+  const scfServer = startScfRuntimeServer({
+    async fetch(_req, ctx) {
+      await ctx.storage.set('probe', { ok: true });
+      return Response.json({
+        hotKey: ctx.env.HOT_KEY || null,
+        bakedOnlyKey: ctx.env.BAKED_ONLY_KEY || null,
+        extraFlag: ctx.env.EXTRA_FLAG || null,
+        procHotKey: process.env.HOT_KEY || null,
+        dbProvider: ctx.db.provider,
+      });
+    },
+  });
+  if (!scfServer.listening) {
+    await new Promise((r) => scfServer.once('listening', r));
+  }
+  const scfPort = scfServer.address().port;
+
+  try {
+    const r1 = await fetch(`http://127.0.0.1:${scfPort}/api/env-check`, {
+      headers: { 'x-myship-gateway-token': 'msgt_hot_test' },
+    });
+    const j1 = await r1.json();
+    assert.equal(j1.hotKey, 'v1-initial');
+    assert.equal(j1.bakedOnlyKey, null, 'Baked-in key absent from remote envs must be cleared on cold start');
+    assert.equal(j1.extraFlag, 'yes');
+    assert.equal(j1.procHotKey, 'v1-initial');
+    assert.equal(j1.dbProvider, 'unconfigured');
+    assert.equal(putPaths[putPaths.length - 1], '/data/hot-app/probe.json');
+
+    // Simulate `myship env set HOT_KEY=v2-updated` & `myship env rm EXTRA_FLAG` & DB + Storage namespace update on COS
+    currentRemoteVars = {
+      HOT_KEY: 'v2-updated',
+      MYSHIP_DB_PROVIDER: 'turso',
+      TURSO_DATABASE_URL: 'libsql://hot-app.turso.io',
+      TURSO_AUTH_TOKEN: 'tok_test_123',
+      MYSHIP_STORAGE_ENV: 'staging',
+    };
+    await new Promise((r) => setTimeout(r, 2100));
+
+    const r2 = await fetch(`http://127.0.0.1:${scfPort}/api/env-check`, {
+      headers: { 'x-myship-gateway-token': 'msgt_hot_test' },
+    });
+    const j2 = await r2.json();
+    assert.equal(j2.hotKey, 'v2-updated', 'Already-deployed SCF version must reflect updated env');
+    assert.equal(j2.extraFlag, null, 'Removed env key must be cleaned up on hot reload');
+    assert.equal(j2.dbProvider, 'turso', 'DB client must be recreated when DB env vars change');
+    assert.equal(
+      putPaths[putPaths.length - 1],
+      '/data/hot-app/staging/probe.json',
+      'Storage client must be recreated when MYSHIP_STORAGE_ENV changes'
+    );
+  } finally {
+    await new Promise((r) => scfServer.close(r));
+    await new Promise((r) => mockCosServer.close(r));
+    for (const k of Object.keys(process.env)) {
+      if (!(k in savedEnv)) delete process.env[k];
+    }
+    Object.assign(process.env, savedEnv);
+  }
+});
+
+test('SCF api-dir bundler supports api/upstreams.json and export const upstreamUrl proxy routes end-to-end', async () => {
+  const tmpRoot = mkdtempSync(join(tmpdir(), 'myship-api-proxy-test-'));
+  const receivedRequests = [];
+  const upstreamServer = http.createServer((req, res) => {
+    receivedRequests.push({
+      method: req.method,
+      url: req.url,
+      project: req.headers['x-myship-project'],
+      route: req.headers['x-myship-function-route'],
+    });
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ ok: true, upstreamUrl: req.url }));
+  });
+  await new Promise((r) => upstreamServer.listen(0, '127.0.0.1', r));
+  const upstreamPort = upstreamServer.address().port;
+
+  try {
+    mkdirSync(join(tmpRoot, 'public'), { recursive: true });
+    mkdirSync(join(tmpRoot, 'api'), { recursive: true });
+    writeFileSync(join(tmpRoot, 'public', 'index.html'), '<h1>Proxy Demo</h1>', 'utf8');
+    writeFileSync(
+      join(tmpRoot, 'api', 'upstreams.json'),
+      JSON.stringify({ '/api/orders': `http://127.0.0.1:${upstreamPort}` }),
+      'utf8'
+    );
+    writeFileSync(
+      join(tmpRoot, 'api', 'js-proxy.js'),
+      `export const upstreamUrl = 'http://127.0.0.1:${upstreamPort}/v1/js';\n`,
+      'utf8'
+    );
+
+    const bundleRes = await bundleScfBackend({ cwd: tmpRoot, targetDir: join(tmpRoot, 'public') });
+    assert.equal(bundleRes.mode, 'api-dir');
+
+    // Execute the compiled bundle directly to verify real outbound proxy execution
+    const bundlePath = join(tmpRoot, 'compiled-api-bundle.mjs');
+    writeFileSync(bundlePath, bundleRes.appBundleCode, 'utf8');
+    const mod = await import(`file://${bundlePath}`);
+
+    const r1 = await mod.fetch(new Request('http://demo.ship.test/api/orders?id=1'), {
+      project: 'proxy-app',
+    });
+    assert.equal(r1.status, 200);
+    const j1 = await r1.json();
+    assert.equal(j1.upstreamUrl, '/api/orders?id=1', 'Root upstream URL must preserve request pathname and query');
+
+    const r2 = await mod.fetch(new Request('http://demo.ship.test/api/js-proxy?foo=bar'), {
+      project: 'proxy-app',
+    });
+    assert.equal(r2.status, 200);
+    const j2 = await r2.json();
+    assert.equal(j2.upstreamUrl, '/v1/js?foo=bar', 'Explicit upstream path must preserve target path and append query');
+    assert.equal(receivedRequests.length, 2);
+    assert.equal(receivedRequests[0].project, 'proxy-app');
+    assert.equal(receivedRequests[0].route, '/api/orders');
+    assert.equal(receivedRequests[1].route, '/api/js-proxy');
+  } finally {
+    await new Promise((r) => upstreamServer.close(r));
     rmSync(tmpRoot, { recursive: true, force: true });
   }
 });

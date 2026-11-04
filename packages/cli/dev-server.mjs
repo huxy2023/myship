@@ -533,9 +533,47 @@ export function startDevServer({
     });
     const webRes = await handler(webReq);
     res.statusCode = webRes.status;
-    webRes.headers.forEach((v, k) => res.setHeader(k, v));
-    const buf = Buffer.from(await webRes.arrayBuffer());
-    res.end(buf);
+    const isSse = (webRes.headers.get('content-type') || '')
+      .toLowerCase()
+      .includes('text/event-stream');
+    webRes.headers.forEach((v, k) => {
+      if (isSse && k.toLowerCase() === 'content-length') return;
+      res.setHeader(k, v);
+    });
+    if (isSse) {
+      res.setHeader('X-Accel-Buffering', 'no');
+      req.socket?.setNoDelay?.(true);
+    }
+
+    if (method === 'HEAD' || !webRes.body) {
+      res.end();
+    } else if (typeof webRes.body.getReader === 'function') {
+      res.flushHeaders();
+      const reader = webRes.body.getReader();
+      const onClose = () => {
+        reader.cancel().catch(() => {});
+      };
+      req.once('close', onClose);
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value && value.byteLength > 0) {
+            res.write(Buffer.from(value));
+          }
+        }
+      } catch {
+        // client disconnected or stream aborted
+      } finally {
+        req.removeListener('close', onClose);
+        if (!res.writableEnded) {
+          res.end();
+        }
+      }
+    } else {
+      const buf = Buffer.from(await webRes.arrayBuffer());
+      res.end(buf);
+    }
     const elapsed = Date.now() - startMs;
     console.log(`  [${new Date().toLocaleTimeString()}] ${method} ${req.url} -> ${webRes.status} (${elapsed}ms)`);
   });

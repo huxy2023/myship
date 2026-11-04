@@ -47,6 +47,7 @@ import {
   ensureScfVersionHttpTrigger,
   deleteScfVersionAndTrigger,
 } from './scf-client.mjs';
+import { resolveBackendEntry } from './scf-bundler.mjs';
 
 export function emitGitHubActionsOutputs({
   deploymentId = '',
@@ -469,24 +470,39 @@ export async function deployRemoteDirectory(
   }
 
   const projCtx = detectProjectContext(cwd, project);
-  const scfBackendEnabled = Boolean(projCtx.backend && projCtx.backend.enabled);
+  const explicitDisabled = Boolean(projCtx.backend && projCtx.backend.enabled === false);
+  let detectedBackendEntry = null;
+  if (!explicitDisabled) {
+    try {
+      detectedBackendEntry = resolveBackendEntry(
+        cwd,
+        absTarget,
+        projCtx.backend?.entry || apiDir || null
+      );
+    } catch {
+      detectedBackendEntry = null;
+    }
+  }
+  const scfBackendEnabled = Boolean(
+    (projCtx.backend && projCtx.backend.enabled) || detectedBackendEntry
+  );
+  const effectiveBackendConfig = projCtx.backend || {
+    enabled: true,
+    provider: 'scf',
+    ...(detectedBackendEntry ? { entry: detectedBackendEntry.relEntry } : {}),
+  };
 
   const files = walkFiles(absTarget);
-  const resolvedApiDir = scfBackendEnabled ? null : resolveApiDir(absTarget, cwd, apiDir);
-  const apiFunctions = scfBackendEnabled ? [] : scanApiFunctions(resolvedApiDir);
+  const apiFunctions = [];
 
-  if (files.length === 0 && apiFunctions.length === 0 && !scfBackendEnabled) {
+  if (files.length === 0 && !scfBackendEnabled) {
     throw new Error(`目标目录为空: ${absTarget}`);
   }
 
   console.log(`☁️  正在向腾讯云 COS 执行 CAS 去重部署... [项目命名空间: ${project}]`);
   console.log(
     `📂 目标目录: ${absTarget} (静态文件: ${files.length} 个${
-      scfBackendEnabled
-        ? `, 全栈业务后端: SCF Web 函数 [已开启]`
-        : apiFunctions.length > 0
-        ? `, 边缘 API 函数: ${apiFunctions.length} 个`
-        : ''
+      scfBackendEnabled ? `, 全栈业务后端: SCF Web 函数 [已开启]` : ''
     })`
   );
 
@@ -496,8 +512,8 @@ export async function deployRemoteDirectory(
     // 统一版本保留计划：预检切流后活跃别名额度并回收超出保留窗口 (活跃版本 + 最近 5 个预览，总计 <= 8) 的旧预览版本，确保为新版本预留触发器名额
     const { protectedQualifiers } = await enforceProjectScfRetention({
       project,
-      functionName: projCtx.backend.functionName,
-      region: projCtx.backend.region || 'ap-guangzhou',
+      functionName: effectiveBackendConfig.functionName,
+      region: effectiveBackendConfig.region || 'ap-guangzhou',
       upcomingAliases: aliases,
     });
 
@@ -514,16 +530,20 @@ export async function deployRemoteDirectory(
       project,
       cwd,
       targetDir: absTarget,
-      backendConfig: projCtx.backend,
+      backendConfig: effectiveBackendConfig,
       envVars: mergedEnvVars,
+      remoteEnvKeys: Object.keys(remoteVars),
       protectedQualifiers,
     });
 
-    if (!projCtx.backend.gatewayToken && backendManifestInfo.gatewayToken) {
+    if (!projCtx.backend?.gatewayToken && backendManifestInfo.gatewayToken) {
       ensureProjectConfig(cwd, {
         project,
         backend: {
-          ...projCtx.backend,
+          ...effectiveBackendConfig,
+          enabled: true,
+          functionName: backendManifestInfo.functionName,
+          region: backendManifestInfo.region,
           gatewayToken: backendManifestInfo.gatewayToken,
         },
       });

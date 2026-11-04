@@ -528,9 +528,9 @@ export async function syncCloudFunctionsPoolAndGenerateEdgeCode({
 export async function saveRemoteProjectEnvAndSyncWorker(
   project = 'default',
   vars = {},
-  { hotReload = true } = {}
+  { cwd = process.cwd() } = {}
 ) {
-  const { remoteDomain } = assertCloudEndpointsConfigured();
+  assertCloudEndpointsConfigured();
   const cleanProj = normalizeDomainToken(project) || 'default';
   const envKey = `envs/${cleanProj}.json`;
   const payload = {
@@ -542,11 +542,6 @@ export async function saveRemoteProjectEnvAndSyncWorker(
   const envsPool = await syncCloudEnvsPool();
   envsPool[cleanProj] = vars;
 
-  let fnPool = null;
-  if (hotReload) {
-    fnPool = await syncCloudFunctionsPool();
-  }
-
   await cosPutObject(
     envKey,
     JSON.stringify(payload, null, 2),
@@ -556,28 +551,7 @@ export async function saveRemoteProjectEnvAndSyncWorker(
   );
   saveLocalEnvsPool(envsPool);
 
-  let syncedWorker = false;
-  if (hotReload && fnPool && Object.keys(fnPool).length > 0) {
-    const { code, allRoutes } = generateProjectApiWorkerCode({
-      project: cleanProj,
-      silent: true,
-      functionsPool: fnPool,
-      envsPool,
-    });
-    if (allRoutes.length > 0) {
-      const teoRes = await deployProjectApiFunctionToTeo({
-        project: cleanProj,
-        code,
-        routes: allRoutes,
-        remoteDomain,
-      });
-      syncedWorker = true;
-      console.log(
-        `  ⚡ [EdgeOne 热更新] 已将项目 [${cleanProj}] 的最新环境变量同步至边缘 API 函数: ${teoRes.functionName} (${teoRes.functionId})`
-      );
-    }
-  }
-  return { payload, envKey, syncedWorker };
+  return { payload, envKey, syncedWorker: false, cwd };
 }
 
 export async function runEnvCommand({
@@ -691,7 +665,7 @@ export async function runEnvCommand({
         `✅ [本地沙盒] 已更新项目 [${cleanProj}] 环境变量 (${updatedKeys.join(', ')})`
       );
     } else {
-      await saveRemoteProjectEnvAndSyncWorker(cleanProj, nextVars);
+      await saveRemoteProjectEnvAndSyncWorker(cleanProj, nextVars, { cwd });
       console.log(
         `✅ [云端私有存储] 已私有保存项目 [${cleanProj}] 环境变量 (${updatedKeys.join(
           ', '
@@ -726,7 +700,7 @@ export async function runEnvCommand({
         }`
       );
     } else {
-      await saveRemoteProjectEnvAndSyncWorker(cleanProj, nextVars);
+      await saveRemoteProjectEnvAndSyncWorker(cleanProj, nextVars, { cwd });
       console.log(
         `✅ [云端私有存储] 已从项目 [${cleanProj}] 移除环境变量: ${
           removed.length > 0 ? removed.join(', ') : '(无匹配项)'
@@ -757,7 +731,7 @@ export async function runEnvCommand({
         `✅ [本地沙盒] 已从 ${basename(targetFile)} 导入 ${importedKeys.length} 项环境变量至项目 [${cleanProj}] (${importedKeys.join(', ')})`
       );
     } else {
-      await saveRemoteProjectEnvAndSyncWorker(cleanProj, nextVars);
+      await saveRemoteProjectEnvAndSyncWorker(cleanProj, nextVars, { cwd });
       console.log(
         `✅ [云端私有存储] 已从 ${basename(targetFile)} 导入 ${
           importedKeys.length

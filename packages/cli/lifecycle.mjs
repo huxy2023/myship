@@ -359,29 +359,6 @@ export async function gcRemoteState({
     saveLocalFunctionsPool(localPool);
   }
 
-  const [syncedPool, syncedEnvs] =
-    plan.activeRoutes.length > 0
-      ? await Promise.all([syncCloudFunctionsPool(), syncCloudEnvsPool()])
-      : [{}, {}];
-  const { code } = generateProjectApiWorkerCode({
-    project: 'myship',
-    silent: true,
-    functionsPool: syncedPool,
-    envsPool: syncedEnvs,
-  });
-  await deployProjectApiFunctionToTeo({
-    project: 'myship',
-    code,
-    routes: plan.activeRoutes,
-    remoteDomain,
-    replaceRoutes: true,
-  });
-  console.log(
-    `  ⚡ [EdgeOne 配额同步] 已校验并同步统一 API 边缘函数路由池，当前活跃路由 (${
-      plan.activeRoutes.length
-    }/15): ${plan.activeRoutes.length > 0 ? plan.activeRoutes.join(', ') : '已清空并释放触发规则'}`
-  );
-
   console.log(
     `\n✅ 云端 GC 清理完成！已回收 ${plan.expiredManifests.length} 个过期快照、${plan.orphanBlobKeys.length} 个孤儿静态块、${plan.orphanFnKeys.length} 个废弃函数归档。`
   );
@@ -642,41 +619,14 @@ export async function removeResources({
       saveLocalFunctionsPool(localPool);
     }
 
-    const hadFunctionsInvolved =
-      orphanPlan.orphanFnKeys.length > 0 ||
-      deleteProjectEnv ||
-      manifestsToRemove.some((m) => Object.keys(m.functions || {}).length > 0);
-
-    if (hadFunctionsInvolved) {
-      const [syncedPool, syncedEnvs] =
-        orphanPlan.activeRoutes.length > 0
-          ? await Promise.all([syncCloudFunctionsPool(), syncCloudEnvsPool()])
-          : [{}, {}];
-      const { code } = generateProjectApiWorkerCode({
-        project: 'myship',
-        silent: true,
-        functionsPool: syncedPool,
-        envsPool: syncedEnvs,
-      });
-      await deployProjectApiFunctionToTeo({
-        project: 'myship',
-        code,
-        routes: orphanPlan.activeRoutes,
-        remoteDomain,
-        replaceRoutes: true,
-      });
-    }
-
     // 联动清理 SCF 云函数或历史版本
     if (cleanPurgeProj) {
       const scfManifest = manifestsToRemove.find((m) => m.backend && m.backend.functionName);
-      if (scfManifest) {
-        await cleanupScfResources({
-          functionName: scfManifest.backend.functionName || resolveScfFunctionName(cleanPurgeProj),
-          region: scfManifest.backend.region || 'ap-guangzhou',
-          deleteEntireFunction: true,
-        });
-      }
+      await cleanupScfResources({
+        functionName: scfManifest?.backend?.functionName || resolveScfFunctionName(cleanPurgeProj),
+        region: scfManifest?.backend?.region || 'ap-guangzhou',
+        deleteEntireFunction: true,
+      });
     } else {
       const retainedScfVers = new Set(
         remainingManifests

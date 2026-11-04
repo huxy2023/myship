@@ -34,9 +34,8 @@ export async function probeEdgeGateway(remoteDomain) {
       headers: { Accept: 'application/json, text/html' },
     });
     clearTimeout(timer);
-    const hasHeader = Boolean(
-      res.headers.get('x-myship-subdomain') || res.headers.get('x-myship-engine')
-    );
+    const engine = res.headers.get('x-myship-engine') || '';
+    const hasHeader = Boolean(res.headers.get('x-myship-subdomain') || engine);
     const text = await res.text();
     const isMyShipBody =
       text.includes('DEPLOYMENT_ALIAS_NOT_FOUND') ||
@@ -45,6 +44,7 @@ export async function probeEdgeGateway(remoteDomain) {
     return {
       online: hasHeader || isMyShipBody,
       status: res.status,
+      engine,
       probeUrl,
     };
   } catch {

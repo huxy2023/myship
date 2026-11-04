@@ -7,15 +7,68 @@
  */
 import http from 'node:http';
 import { createCloudStorage, dispatchFullStackModule } from './storage-client.mjs';
-import { createDatabaseClient } from './db-client.mjs';
+import { createDatabaseClient, closeDatabasePools } from './db-client.mjs';
+
+const DB_ENV_WATCH_KEYS = [
+  'MYSHIP_DB_PROVIDER',
+  'DATABASE_URL',
+  'NEON_DATABASE_URL',
+  'MYSQL_URL',
+  'TURSO_DATABASE_URL',
+  'TURSO_AUTH_TOKEN',
+  'LIBSQL_URL',
+  'LIBSQL_AUTH_TOKEN',
+  'TCB_ENV_ID',
+  'PGHOST',
+  'PGPORT',
+  'PGDATABASE',
+  'PGUSER',
+  'PGPASSWORD',
+  'PG_SCHEMA',
+  'PGOPTIONS',
+  'MYSQL_HOST',
+  'MYSQL_PORT',
+  'MYSQL_USER',
+  'MYSQL_PASSWORD',
+  'MYSQL_DATABASE',
+  'CF_ACCOUNT_ID',
+  'CF_D1_DATABASE_ID',
+  'CF_API_TOKEN',
+];
+
+function computeDbEnvSignature(envObj) {
+  return DB_ENV_WATCH_KEYS.map((k) => `${k}=${envObj[k] || ''}`).join('|');
+}
+
+const STORAGE_ENV_WATCH_KEYS = [
+  'MYSHIP_STORAGE_ENV',
+  'MYSHIP_COS_ORIGIN',
+  'COS_ORIGIN',
+  'MYSHIP_DATA_SECRET_ID',
+  'MYSHIP_DATA_SECRET_KEY',
+  'MYSHIP_DATA_TOKEN',
+  'MYSHIP_SECRET_ID',
+  'MYSHIP_SECRET_KEY',
+  'MYSHIP_TOKEN',
+  'TENCENT_SECRET_ID',
+  'TENCENT_SECRET_KEY',
+  'TENCENT_TOKEN',
+];
+
+function computeStorageEnvSignature(envObj) {
+  return STORAGE_ENV_WATCH_KEYS.map((k) => `${k}=${envObj[k] || ''}`).join('|');
+}
 
 export function startScfRuntimeServer(userApp) {
   const PORT = Number(process.env.PORT || 9000);
   const PROJECT = process.env.MYSHIP_PROJECT || 'default';
   const GATEWAY_TOKEN = process.env.MYSHIP_GATEWAY_TOKEN || '';
+  const INITIAL_ENV = { ...process.env };
 
-  const { storage, files } = createCloudStorage(PROJECT, process.env);
-  const db = createDatabaseClient({
+  let currentStorageSig = computeStorageEnvSignature(process.env);
+  let { storage, files, loadRemoteEnv } = createCloudStorage(PROJECT, process.env);
+  let currentDbSig = computeDbEnvSignature(process.env);
+  let db = createDatabaseClient({
     project: PROJECT,
     env: process.env,
     preferLocalSqlite: false,
@@ -24,6 +77,70 @@ export function startScfRuntimeServer(userApp) {
   globalThis.myshipStorage = storage;
   globalThis.myshipFiles = files;
   globalThis.myshipDb = db;
+
+  let lastEnvSyncMs = 0;
+  const ENV_SYNC_TTL_MS = 2000;
+  const initialRemoteEnvKeys = new Set(
+    String(process.env.MYSHIP_PROJECT_ENV_KEYS || '')
+      .split(',')
+      .map((k) => k.trim())
+      .filter(Boolean)
+  );
+  let dynamicEnvKeys = new Set(initialRemoteEnvKeys);
+
+  async function refreshProjectEnvIfNeeded() {
+    if (typeof loadRemoteEnv !== 'function') return;
+    const now = Date.now();
+    if (now - lastEnvSyncMs < ENV_SYNC_TTL_MS) return;
+    lastEnvSyncMs = now;
+    try {
+      const remoteVars = await loadRemoteEnv();
+      if (remoteVars && typeof remoteVars === 'object') {
+        const nextKeys = new Set(Object.keys(remoteVars));
+        for (const oldKey of dynamicEnvKeys) {
+          if (!nextKeys.has(oldKey)) {
+            if (
+              !initialRemoteEnvKeys.has(oldKey) &&
+              Object.prototype.hasOwnProperty.call(INITIAL_ENV, oldKey)
+            ) {
+              process.env[oldKey] = INITIAL_ENV[oldKey];
+            } else {
+              delete process.env[oldKey];
+            }
+          }
+        }
+        for (const [k, v] of Object.entries(remoteVars)) {
+          if (k && v !== undefined && v !== null) {
+            process.env[k] = String(v);
+          }
+        }
+        dynamicEnvKeys = nextKeys;
+        const nextStorageSig = computeStorageEnvSignature(process.env);
+        if (nextStorageSig !== currentStorageSig) {
+          currentStorageSig = nextStorageSig;
+          const nextStorageBundle = createCloudStorage(PROJECT, process.env);
+          storage = nextStorageBundle.storage;
+          files = nextStorageBundle.files;
+          loadRemoteEnv = nextStorageBundle.loadRemoteEnv;
+          globalThis.myshipStorage = storage;
+          globalThis.myshipFiles = files;
+        }
+        const nextDbSig = computeDbEnvSignature(process.env);
+        if (nextDbSig !== currentDbSig) {
+          currentDbSig = nextDbSig;
+          await closeDatabasePools(PROJECT).catch(() => {});
+          db = createDatabaseClient({
+            project: PROJECT,
+            env: process.env,
+            preferLocalSqlite: false,
+          });
+          globalThis.myshipDb = db;
+        }
+      }
+    } catch {
+      // ignore transient network error and keep current process.env
+    }
+  }
 
   const RECENT_LOGS = [];
   const MAX_RECENT_LOGS = 100;
@@ -158,6 +275,8 @@ export function startScfRuntimeServer(userApp) {
       const normalizedRoute =
         pathname.length > 1 && pathname.endsWith('/') ? pathname.slice(0, -1) : pathname;
 
+      await refreshProjectEnvIfNeeded();
+
       const context = {
         request: webReq,
         project: PROJECT,
@@ -168,7 +287,7 @@ export function startScfRuntimeServer(userApp) {
         pathname,
         url,
         query: Object.fromEntries(url.searchParams),
-        env: process.env,
+        env: { ...process.env },
         storage,
         files,
         bucket: files,
@@ -181,23 +300,45 @@ export function startScfRuntimeServer(userApp) {
       activeRequestLogs = null;
       const status = webRes.status || 200;
       res.statusCode = status;
+      const isSse = (webRes.headers.get('content-type') || '')
+        .toLowerCase()
+        .includes('text/event-stream');
       webRes.headers.forEach((v, k) => {
         if (k.toLowerCase() !== 'content-length') {
           res.setHeader(k, v);
         }
       });
       res.setHeader('X-MyShip-SCF-Version', scfVersion);
+      if (isSse) {
+        res.setHeader('X-Accel-Buffering', 'no');
+        req.socket?.setNoDelay?.(true);
+      }
 
-      if (webRes.body && typeof webRes.body.getReader === 'function') {
+      if (method === 'HEAD' || !webRes.body) {
+        res.end();
+      } else if (typeof webRes.body.getReader === 'function') {
+        res.flushHeaders();
         const reader = webRes.body.getReader();
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value && value.byteLength > 0) {
-            res.write(Buffer.from(value));
+        const onClose = () => {
+          reader.cancel().catch(() => {});
+        };
+        req.once('close', onClose);
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (value && value.byteLength > 0) {
+              res.write(Buffer.from(value));
+            }
+          }
+        } catch {
+          // client disconnected or stream aborted
+        } finally {
+          req.removeListener('close', onClose);
+          if (!res.writableEnded) {
+            res.end();
           }
         }
-        res.end();
       } else {
         const outBuf = Buffer.from(await webRes.arrayBuffer());
         res.setHeader('Content-Length', String(outBuf.length));

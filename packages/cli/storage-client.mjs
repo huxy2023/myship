@@ -277,7 +277,13 @@ export function createCloudStorage(project = 'default', env = process.env) {
         return missingErr();
       },
     };
-    return { storage: stub, files: stub };
+    return {
+      storage: stub,
+      files: stub,
+      async loadRemoteEnv() {
+        return null;
+      },
+    };
   }
 
   function signCos(method, objectKey, expiresSec = 3600) {
@@ -438,7 +444,17 @@ export function createCloudStorage(project = 'default', env = process.env) {
     },
   };
 
-  return { storage: storageObj, files: filesObj };
+  async function loadRemoteEnv() {
+    const objKey = `envs/${cleanProj}.json`;
+    const { url, headers } = signCos('GET', objKey);
+    const res = await fetch(url, { method: 'GET', headers });
+    if (res.status === 404) return {};
+    if (!res.ok) throw new Error(`COS loadRemoteEnv failed (${res.status})`);
+    const data = await res.json();
+    return data && typeof data.vars === 'object' && data.vars ? data.vars : {};
+  }
+
+  return { storage: storageObj, files: filesObj, loadRemoteEnv };
 }
 
 export async function dispatchFullStackModule(rawMod, request, context) {

@@ -194,11 +194,13 @@ export function loadTencentCredentials(env = process.env) {
     const secretId = raw.secretId || raw.SecretId;
     const secretKey = raw.secretKey || raw.SecretKey;
     const token = raw.token || raw.Token || '';
+    const expiresAt = raw.expiresAt ? Number(raw.expiresAt) : null;
     if (secretId && secretKey) {
       return {
         secretId,
         secretKey,
         token,
+        expiresAt,
         source: `~/.tccli/default.credential (tccli 自动复用)`,
       };
     }
@@ -217,6 +219,8 @@ export function getAuthStatus() {
       authenticated: true,
       source: cred.source,
       maskedSecretId: maskSecret(cred.secretId),
+      isTemporary: Boolean(cred.token),
+      expiresAt: cred.expiresAt || null,
       ...endpoints,
     };
   } catch (err) {

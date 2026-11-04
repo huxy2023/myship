@@ -9,13 +9,13 @@
  * 4. 云端引导层 (`_myship/bootstrap.mjs`) 直接通过 `esbuild` 打包真实模块 `./scf-bootstrap-runtime.mjs`、`./db-client.mjs` 与 `./storage-client.mjs`，
  *    消灭本地与云端运行时之间的双份代码复制。
  */
-import { existsSync, statSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, statSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { resolve, relative, dirname, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deflateRawSync } from 'node:zlib';
 import { createRequire } from 'node:module';
 import { walkFiles } from './project-context.mjs';
-import { normalizeApiRoute, resolveApiDir } from './serverless.mjs';
+import { normalizeApiRoute, resolveApiDir, extractDeclaredUpstreamUrl } from './serverless.mjs';
 
 export {
   createLocalPersistentStorage,
@@ -64,6 +64,65 @@ const SERVER_ENTRY_CANDIDATES = [
   'backend/index.ts',
 ];
 
+function scanApiDirectoryEntries(apiDir) {
+  if (!apiDir || !existsSync(apiDir) || !statSync(apiDir).isDirectory()) {
+    return [];
+  }
+  const upstreamsMap = {};
+  const upstreamsJsonPath = resolve(apiDir, 'upstreams.json');
+  if (existsSync(upstreamsJsonPath) && statSync(upstreamsJsonPath).isFile()) {
+    try {
+      const rawUpstreams = JSON.parse(readFileSync(upstreamsJsonPath, 'utf8'));
+      if (rawUpstreams && typeof rawUpstreams === 'object') {
+        for (const [k, v] of Object.entries(rawUpstreams)) {
+          const normRoute = normalizeApiRoute(k);
+          const urlVal = typeof v === 'string' ? v : v && v.upstreamUrl ? v.upstreamUrl : null;
+          if (urlVal && /^https?:\/\//i.test(urlVal)) {
+            upstreamsMap[normRoute] = urlVal.trim();
+          }
+        }
+      }
+    } catch {
+      // ignore invalid upstreams.json
+    }
+  }
+
+  const rawFiles = walkFiles(apiDir, apiDir, { excludeApiJs: false }).filter(
+    (f) =>
+      f.relPath.endsWith('.js') || f.relPath.endsWith('.mjs') || f.relPath.endsWith('.ts')
+  );
+  const byRoute = new Map();
+  for (const f of rawFiles) {
+    const route = normalizeApiRoute(f.relPath);
+    let sourceCode = '';
+    try {
+      sourceCode = readFileSync(f.fullPath, 'utf8');
+    } catch {
+      sourceCode = '';
+    }
+    const upstreamUrl = extractDeclaredUpstreamUrl(sourceCode) || upstreamsMap[route] || null;
+    byRoute.set(route, {
+      ...f,
+      route,
+      upstreamUrl,
+    });
+  }
+
+  for (const [route, upstreamUrl] of Object.entries(upstreamsMap)) {
+    if (!byRoute.has(route)) {
+      byRoute.set(route, {
+        fullPath: null,
+        relPath: '/upstreams.json',
+        size: 0,
+        route,
+        upstreamUrl,
+      });
+    }
+  }
+
+  return [...byRoute.values()].sort((a, b) => a.route.localeCompare(b.route));
+}
+
 export function resolveBackendEntry(cwd = process.cwd(), targetDir = null, explicitEntry = null) {
   if (explicitEntry) {
     const absExplicit = resolve(cwd, explicitEntry);
@@ -77,21 +136,13 @@ export function resolveBackendEntry(cwd = process.cwd(), targetDir = null, expli
         };
       }
       if (st.isDirectory()) {
-        const rawFiles = walkFiles(absExplicit, absExplicit, { excludeApiJs: false }).filter(
-          (f) =>
-            f.relPath.endsWith('.js') ||
-            f.relPath.endsWith('.mjs') ||
-            f.relPath.endsWith('.ts')
-        );
-        if (rawFiles.length > 0) {
+        const scannedFiles = scanApiDirectoryEntries(absExplicit);
+        if (scannedFiles.length > 0) {
           return {
             mode: 'api-dir',
             apiDir: absExplicit,
             relEntry: relative(cwd, absExplicit).split('\\').join('/') || 'api',
-            files: rawFiles.map((f) => ({
-              ...f,
-              route: normalizeApiRoute(f.relPath),
-            })),
+            files: scannedFiles,
           };
         }
       }
@@ -113,21 +164,13 @@ export function resolveBackendEntry(cwd = process.cwd(), targetDir = null, expli
   const absTarget = targetDir ? resolve(cwd, targetDir) : cwd;
   const apiDir = resolveApiDir(absTarget, cwd);
   if (apiDir) {
-    const rawFiles = walkFiles(apiDir, apiDir, { excludeApiJs: false }).filter(
-      (f) =>
-        f.relPath.endsWith('.js') ||
-        f.relPath.endsWith('.mjs') ||
-        f.relPath.endsWith('.ts')
-    );
-    if (rawFiles.length > 0) {
+    const scannedFiles = scanApiDirectoryEntries(apiDir);
+    if (scannedFiles.length > 0) {
       return {
         mode: 'api-dir',
         apiDir,
         relEntry: relative(cwd, apiDir).split('\\').join('/') || 'api',
-        files: rawFiles.map((f) => ({
-          ...f,
-          route: normalizeApiRoute(f.relPath),
-        })),
+        files: scannedFiles,
       };
     }
   }
@@ -151,10 +194,22 @@ function generateApiDirVirtualEntry(apiFiles) {
   const imports = [];
   const routes = [];
   apiFiles.forEach((f, idx) => {
-    const varName = `routeMod_${idx}`;
-    const cleanPath = f.fullPath.split('\\').join('/');
-    imports.push(`import * as ${varName} from ${JSON.stringify(cleanPath)};`);
-    routes.push(`  ${JSON.stringify(f.route)}: ${varName},`);
+    if (f.fullPath) {
+      const varName = `routeMod_${idx}`;
+      const cleanPath = f.fullPath.split('\\').join('/');
+      imports.push(`import * as ${varName} from ${JSON.stringify(cleanPath)};`);
+      routes.push(
+        `  ${JSON.stringify(f.route)}: { mod: ${varName}, upstreamUrl: ${JSON.stringify(
+          f.upstreamUrl || null
+        )} },`
+      );
+    } else {
+      routes.push(
+        `  ${JSON.stringify(f.route)}: { mod: {}, upstreamUrl: ${JSON.stringify(
+          f.upstreamUrl || null
+        )} },`
+      );
+    }
   });
 
   return `${imports.join('\n')}
@@ -162,6 +217,60 @@ function generateApiDirVirtualEntry(apiFiles) {
 const ROUTE_TABLE = {
 ${routes.join('\n')}
 };
+
+async function proxyToUpstreamUrl(upstreamUrl, request, context, matchedRoute) {
+  const method = (request.method || 'GET').toUpperCase();
+  const baseProxyHeaders = {
+    'access-control-allow-origin': '*',
+    'access-control-allow-methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
+    'access-control-allow-headers': 'Content-Type, Authorization, X-Requested-With',
+    'cache-control': 'no-store, no-cache, must-revalidate',
+    'x-myship-proxy-mode': 'SCF-Upstream-Proxy',
+    'x-myship-project': (context && context.project) || 'default',
+    'x-myship-function-route': matchedRoute,
+  };
+  if (method === 'OPTIONS') {
+    return new Response(null, { status: 204, headers: baseProxyHeaders });
+  }
+  const reqUrl = new URL(request.url);
+  const targetUrl = new URL(upstreamUrl);
+  if (targetUrl.pathname === '/') targetUrl.pathname = reqUrl.pathname;
+  if (reqUrl.search) targetUrl.search = reqUrl.search;
+  const forwardHeaders = {};
+  request.headers.forEach((v, k) => {
+    const lower = k.toLowerCase();
+    if (lower !== 'host' && lower !== 'x-myship-gateway-token') {
+      forwardHeaders[k] = v;
+    }
+  });
+  forwardHeaders['x-myship-project'] = (context && context.project) || 'default';
+  forwardHeaders['x-myship-subdomain'] = (context && context.subdomain) || '';
+  forwardHeaders['x-myship-deployment-id'] = (context && context.deploymentId) || '';
+  forwardHeaders['x-myship-function-route'] = matchedRoute;
+
+  const upstreamRes = await globalThis.fetch(targetUrl.toString(), {
+    method,
+    headers: forwardHeaders,
+    body: method !== 'GET' && method !== 'HEAD' ? request.body : undefined,
+    duplex: method !== 'GET' && method !== 'HEAD' ? 'half' : undefined,
+  });
+  const mergedHeaders = { ...baseProxyHeaders };
+  upstreamRes.headers.forEach((v, k) => {
+    const lower = k.toLowerCase();
+    if (
+      lower !== 'content-encoding' &&
+      lower !== 'content-length' &&
+      lower !== 'transfer-encoding' &&
+      lower !== 'connection'
+    ) {
+      mergedHeaders[k] = v;
+    }
+  });
+  return new Response(upstreamRes.body, {
+    status: upstreamRes.status,
+    headers: mergedHeaders,
+  });
+}
 
 export async function fetch(request, context) {
   const url = new URL(request.url);
@@ -171,20 +280,23 @@ export async function fetch(request, context) {
       ? rawPathname.slice(0, -1)
       : rawPathname;
 
-  let targetMod = ROUTE_TABLE[normalizedRoute];
-  if (!targetMod) {
-    for (const [r, mod] of Object.entries(ROUTE_TABLE)) {
+  let matchedRoute = normalizedRoute;
+  let targetEntry = ROUTE_TABLE[normalizedRoute];
+  if (!targetEntry) {
+    for (const [r, entry] of Object.entries(ROUTE_TABLE)) {
       if (r !== '/api' && normalizedRoute.startsWith(r + '/')) {
-        targetMod = mod;
+        matchedRoute = r;
+        targetEntry = entry;
         break;
       }
     }
-    if (!targetMod && ROUTE_TABLE['/api']) {
-      targetMod = ROUTE_TABLE['/api'];
+    if (!targetEntry && ROUTE_TABLE['/api']) {
+      matchedRoute = '/api';
+      targetEntry = ROUTE_TABLE['/api'];
     }
   }
 
-  if (!targetMod) {
+  if (!targetEntry) {
     return new Response(
       JSON.stringify({
         error: 'API Route Not Found: ' + normalizedRoute,
@@ -192,6 +304,18 @@ export async function fetch(request, context) {
       }),
       { status: 404, headers: { 'content-type': 'application/json; charset=UTF-8' } }
     );
+  }
+
+  const targetMod = targetEntry.mod || targetEntry;
+  const declaredUpstream =
+    targetEntry.upstreamUrl ||
+    targetMod.upstreamUrl ||
+    targetMod.scfUrl ||
+    targetMod.proxyUrl ||
+    null;
+
+  if (declaredUpstream) {
+    return await proxyToUpstreamUrl(declaredUpstream, request, context, matchedRoute);
   }
 
   const method = (request.method || 'GET').toUpperCase();
@@ -338,10 +462,11 @@ function mapTsRelPath(relPath) {
 }
 
 export async function bundleScfBackend({
-  cwd = process.cwd(),
+  cwd: rawCwd = process.cwd(),
   targetDir = null,
   explicitEntry = null,
 } = {}) {
+  const cwd = existsSync(rawCwd) ? realpathSync(rawCwd) : resolve(rawCwd);
   const resolved = resolveBackendEntry(cwd, targetDir, explicitEntry);
   if (!resolved) {
     throw new Error(
@@ -359,9 +484,11 @@ export async function bundleScfBackend({
   let buildResult;
   try {
     if (resolved.mode === 'entry') {
+      const finalEntryRel = mapTsRelPath(resolved.relEntry);
       buildResult = await esbuild.build({
         entryPoints: [resolved.entryPath],
         absWorkingDir: cwd,
+        outfile: resolve(cwd, finalEntryRel),
         bundle: true,
         platform: 'node',
         target: 'node20',
@@ -382,6 +509,7 @@ export async function bundleScfBackend({
           loader: 'js',
         },
         absWorkingDir: cwd,
+        outfile: resolve(cwd, '_myship/api-router.mjs'),
         bundle: true,
         platform: 'node',
         target: 'node20',

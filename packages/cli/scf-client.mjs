@@ -24,6 +24,7 @@ import {
   getEffectiveEndpoints,
   cosGetJson,
   deployEdgeFunctionToTeo,
+  probeEdgeGateway,
 } from './cos-client.mjs';
 import {
   generateEdgeFunctionCode,
@@ -521,6 +522,7 @@ export async function deployScfBackendVersion({
   targetDir = null,
   backendConfig = {},
   envVars = {},
+  remoteEnvKeys = null,
   protectedQualifiers = new Set(),
 } = {}) {
   const cleanProj = normalizeDomainToken(project) || 'default';
@@ -570,31 +572,41 @@ export async function deployScfBackendVersion({
   );
 
   if (cred.token && !hasExplicitRuntimeCreds && !scfRole) {
-    throw new Error(
-      '检测到当前部署使用的是腾讯云临时会话凭证 (含 SessionToken，短期内会过期)，不能固化为云函数长期存储凭证。请配置长期 SecretId/SecretKey，或在项目环境变量中显式设置长期的 MYSHIP_DATA_SECRET_ID / MYSHIP_DATA_SECRET_KEY，或配置 SCF 运行角色 (backend.role / MYSHIP_SCF_ROLE)。'
+    const remainMin =
+      cred.expiresAt && Number.isFinite(cred.expiresAt)
+        ? Math.max(0, Math.round((cred.expiresAt * 1000 - Date.now()) / 60000))
+        : null;
+    const expireHint = remainMin !== null ? `，剩余有效期约 ${remainMin} 分钟` : '';
+    console.log(
+      `  ℹ️  [凭证提示] 当前使用临时会话凭证 (${cred.source}${expireHint})，将继续为你完成部署；如需云函数长期免续期读写 COS，可按需配置长期密钥或绑定 SCF 运行角色。`
     );
   }
 
   const resourceEnv = resolveProjectResourceEnv(cwd, cleanProj);
+  const trackedRemoteKeys = Array.isArray(remoteEnvKeys) ? remoteEnvKeys : [];
+  const projectEnvKeysList = trackedRemoteKeys.filter(Boolean).join(',');
   const mergedEnvMap = {
     NODE_ENV: 'production',
     ...resourceEnv,
     ...envVars,
     MYSHIP_PROJECT: cleanProj,
     MYSHIP_GATEWAY_TOKEN: gatewayToken,
+    ...(projectEnvKeysList ? { MYSHIP_PROJECT_ENV_KEYS: projectEnvKeysList } : {}),
     ...(cosOrigin ? { MYSHIP_COS_ORIGIN: cosOrigin } : {}),
   };
 
   if (!scfRole && !hasExplicitRuntimeCreds) {
-    const currentEnvLen = JSON.stringify(mergedEnvMap).length;
-    const credLen = (cred.secretId || '').length + (cred.secretKey || '').length;
-    if (currentEnvLen + credLen >= 3800) {
-      throw new Error(
-        `项目环境变量与云端持久化凭证总长度 (${currentEnvLen + credLen} B) 超出腾讯云 SCF 4KB 限制，请精简环境变量后重试。`
-      );
-    }
     mergedEnvMap.MYSHIP_DATA_SECRET_ID = cred.secretId;
     mergedEnvMap.MYSHIP_DATA_SECRET_KEY = cred.secretKey;
+    if (cred.token) {
+      mergedEnvMap.MYSHIP_DATA_TOKEN = cred.token;
+    }
+    const totalEnvLen = JSON.stringify(mergedEnvMap).length;
+    if (totalEnvLen >= 3900) {
+      throw new Error(
+        `项目环境变量与云端持久化凭证总长度 (${totalEnvLen} B) 超出腾讯云 SCF 4KB 限制。请精简环境变量，或配置 SCF 运行角色 (backend.role / MYSHIP_SCF_ROLE) 后重试。`
+      );
+    }
   } else if (JSON.stringify(mergedEnvMap).length >= 3950) {
     throw new Error(
       `项目环境变量总长度 (${JSON.stringify(mergedEnvMap).length} B) 超出腾讯云 SCF 4KB 限制，请精简环境变量后重试。`
@@ -839,6 +851,7 @@ export async function runBackendCommand({
   entry = null,
   role = null,
   isLocal = false,
+  upgradeGateway = false,
 } = {}) {
   const ctx = detectProjectContext(cwd, explicitProject);
   const targetRegion = region || ctx.backend?.region || inferCosRegion();
@@ -970,9 +983,14 @@ export async function runBackendCommand({
       const { cosOrigin, remoteDomain } = getEffectiveEndpoints();
       if (cosOrigin && remoteDomain) {
         try {
-          const { code } = generateEdgeFunctionCode({ cosOrigin, silent: true });
-          await deployEdgeFunctionToTeo({ code, remoteDomain });
-          console.log(`🌐 已同步升级全局 EdgeOne 网关 (myship-cas-router v2.2，支持 /api/* 通配转发)`);
+          const probe = await probeEdgeGateway(remoteDomain);
+          if (!probe.online || upgradeGateway) {
+            const { code } = generateEdgeFunctionCode({ cosOrigin, silent: true });
+            await deployEdgeFunctionToTeo({ code, remoteDomain });
+            console.log(`🌐 已同步部署全局 EdgeOne 网关 (myship-cas-router v2.2，支持 /api/* 通配转发)`);
+          } else {
+            console.log(`🌐 全局 EdgeOne 网关 (myship-cas-router) 已在线运行，无需重复修改共享网关`);
+          }
         } catch {
           // ignore if current credential does not have TEO ModifyFunction permission
         }
