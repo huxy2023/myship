@@ -1,6 +1,6 @@
 {
   "name": "@myship/cli",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "license": "MIT",
   "type": "module",
   "description": "Self-hosted BYOC full-stack & CAS deployment engine on your own Tencent Cloud EdgeOne, COS, SCF & Serverless Databases",

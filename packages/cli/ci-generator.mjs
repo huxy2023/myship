@@ -29,13 +29,13 @@ permissions:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '24'
 
@@ -74,14 +74,14 @@ jobs:
             exit 0
           fi
           if [ "$EVENT_NAME" = "pull_request" ]; then
-            npx --yes github:huxy2023/myship "$MYSHIP_DIR" -d "pr-\${PR_NUMBER}" -p "$MYSHIP_PROJECT"
+            npx --yes @myship/cli@latest "$MYSHIP_DIR" -d "pr-\${PR_NUMBER}" -p "$MYSHIP_PROJECT"
           else
-            npx --yes github:huxy2023/myship "$MYSHIP_DIR" -p "$MYSHIP_PROJECT"
+            npx --yes @myship/cli@latest "$MYSHIP_DIR" -p "$MYSHIP_PROJECT"
           fi
 
       - name: Post PR Preview Comment
         if: github.event_name == 'pull_request' && steps.deploy.outputs.primary_url != ''
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           PREVIEW_URL: \${{ steps.deploy.outputs.primary_url }}
           IMMUTABLE_URL: \${{ steps.deploy.outputs.immutable_url }}

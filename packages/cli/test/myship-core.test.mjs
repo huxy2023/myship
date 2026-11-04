@@ -207,7 +207,16 @@ test('3. Project context & CI workflow generator: Vite public/ handling and work
     // Re-running with overwrite=true regenerates workflow
     const ciRes3 = setupCiWorkflow(viteDir, { overwrite: true });
     assert.equal(ciRes3.preservedExistingWorkflow, false);
-    assert(readFileSync(ciRes1.workflowPath, 'utf8').includes('MYSHIP_DIR: "./dist"'));
+    const regeneratedYaml = readFileSync(ciRes1.workflowPath, 'utf8');
+    assert(regeneratedYaml.includes('MYSHIP_DIR: "./dist"'));
+    assert(regeneratedYaml.includes('runs-on: ubuntu-24.04'), 'Must pin ubuntu-24.04 instead of ubuntu-latest');
+    assert(regeneratedYaml.includes('actions/checkout@v6'), 'Must use Node 24 compatible checkout@v6');
+    assert(regeneratedYaml.includes('actions/setup-node@v6'), 'Must use Node 24 compatible setup-node@v6');
+    assert(regeneratedYaml.includes('actions/github-script@v8'), 'Must use Node 24 compatible github-script@v8');
+    assert(regeneratedYaml.includes('@myship/cli@latest'), 'Must invoke published @myship/cli@latest package');
+    assert(!regeneratedYaml.includes('ubuntu-latest'));
+    assert(!regeneratedYaml.includes('@v4'));
+    assert(!regeneratedYaml.includes('@v7'));
 
     // Case B: Pure static project (no scripts.build) with root index.html
     const staticDir = join(tmpRoot, 'static-app');
