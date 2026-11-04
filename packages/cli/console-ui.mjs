@@ -144,7 +144,7 @@ export function renderConsoleHtml({
         <div class="card">
           <div class="card-header">
             <h2 class="card-title">📦 历史构建版本快照时间轴 (manifests/*.json)</h2>
-            <span style="font-size:12px; color:var(--muted);">点击「🔍 详情抽屉」可滑出查看快照文件树、边缘函数与 SCF 锁版本配置</span>
+            <span style="font-size:12px; color:var(--muted);">支持点击「🔍 详情抽屉」检查文件树/SCF 版本，或一键「🚫 禁用版本」拦截缺陷快照</span>
           </div>
           <table>
             <thead>

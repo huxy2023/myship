@@ -557,12 +557,29 @@ export function buildConsoleClientScript(safeProj = 'default') {
           .join('') +
         '</tbody></table>';
 
+      let availBannerHtml = '';
+      if (m.disabled === true || m.projectDisabled === true) {
+        const isDplDis = m.disabled === true;
+        const reasonStr = (isDplDis ? m.disabledReason : m.projectDisabledReason) || '管理员已暂停访问';
+        availBannerHtml =
+          '<div class="card" style="margin-bottom:14px;border-color:var(--danger);background:var(--bg-subtle);">' +
+          '<div style="font-weight:700;color:var(--danger);margin-bottom:4px;">' +
+          (isDplDis ? '🚫 当前构建版本已被单独禁用' : '⏸️ 当前所属项目处于全站下线维护状态') +
+          '</div><div style="font-size:12.5px;color:var(--muted);">原因: ' + esc(reasonStr) + '</div></div>';
+      }
+
       bodyEl.innerHTML =
         '<div style="margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">' +
         '<div><div style="color:var(--muted);font-size:12px;">不可变快照预览地址</div>' +
         '<a href="' + esc(immUrl) + '" target="_blank" rel="noopener" style="font-weight:600;">' + esc(immUrl) + ' ↗</a></div>' +
-        '<button class="primary" onclick="promoteToPrimary(\\'' + esc(m.id) + '\\')">⚡ 将主域名切流至此版本</button>' +
-        '</div>' +
+        '<div class="row-actions">' +
+        (m.disabled === true
+          ? ''
+          : '<button class="primary" onclick="promoteToPrimary(\\'' + esc(m.id) + '\\')">⚡ 将主域名切流至此版本</button>') +
+        '<button onclick="closeSnapshotDrawer();toggleDeploymentAvailability(\\'' + esc(m.id) + '\\', ' + (m.disabled === true ? 'true' : 'false') + ')">' +
+        (m.disabled === true ? '🟢 解除禁用' : '🚫 禁用此版本') +
+        '</button></div></div>' +
+        availBannerHtml +
         backendHtml +
         fnsHtml +
         filesHtml;
