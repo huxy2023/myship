@@ -759,6 +759,14 @@ export async function fetch(request, context) {
   assert.equal(ctx.backend?.provider, 'scf');
   assert.equal(ctx.backend?.role, 'SCF_ReviewRole');
   assert(ctx.backend?.gatewayToken?.startsWith('msgt_'));
+  const diskProjJson = JSON.parse(readFileSync(join(appDir, '.myship/project.json'), 'utf8'));
+  assert.equal(
+    diskProjJson.backend?.gatewayToken,
+    undefined,
+    'Auto-generated gatewayToken must be stored in git-ignored .myship/secrets.json, never in .myship/project.json'
+  );
+  const diskSecretsJson = JSON.parse(readFileSync(join(appDir, '.myship/secrets.json'), 'utf8'));
+  assert.equal(diskSecretsJson.gatewayToken, ctx.backend.gatewayToken);
 
   const bundleRes = await bundleScfBackend({ cwd: appDir, targetDir: join(appDir, 'dist') });
   assert.equal(bundleRes.mode, 'entry');

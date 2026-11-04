@@ -40,10 +40,13 @@ jobs:
           node-version: '24'
 
       - name: Install & Build (if package.json has build script)
+        env:
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
         run: |
           if [ -f package.json ] && node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.build ? 0 : 1)"; then
             if [ -f pnpm-lock.yaml ]; then
-              corepack enable && pnpm install --frozen-lockfile && pnpm run build
+              (corepack enable && pnpm --version >/dev/null 2>&1) || npm install -g pnpm
+              pnpm install --frozen-lockfile && pnpm run build
             elif [ -f package-lock.json ]; then
               npm ci && npm run build
             else

@@ -213,11 +213,39 @@ export function inferCosRegion(cosOrigin = '') {
   return match ? match[1].toLowerCase() : 'ap-guangzhou';
 }
 
+export function loadLocalProjectSecrets(cwd = process.cwd()) {
+  try {
+    const secretsPath = resolve(cwd, '.myship', 'secrets.json');
+    if (existsSync(secretsPath)) {
+      const parsed = JSON.parse(readFileSync(secretsPath, 'utf8'));
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    }
+  } catch {
+    // ignore
+  }
+  return {};
+}
+
+export function saveLocalProjectSecrets(cwd = process.cwd(), partial = {}) {
+  try {
+    const myshipDir = resolve(cwd, '.myship');
+    ensureMyShipGitignore(myshipDir);
+    const secretsPath = resolve(myshipDir, 'secrets.json');
+    const existing = loadLocalProjectSecrets(cwd);
+    const merged = { ...existing, ...partial, updatedAt: new Date().toISOString() };
+    writeFileSync(secretsPath, JSON.stringify(merged, null, 2), { encoding: 'utf8', mode: 0o600 });
+    return merged;
+  } catch {
+    return partial;
+  }
+}
+
 export function detectProjectContext(cwd = process.cwd(), explicitProject = null) {
   const myshipDir = resolve(cwd, '.myship');
   const projectJsonPath = resolve(myshipDir, 'project.json');
   const legacyMyshipJson = resolve(cwd, '.myship.json');
   const pkgJsonPath = resolve(cwd, 'package.json');
+  const localSecrets = loadLocalProjectSecrets(cwd);
 
   let savedCfg = null;
   let configSource = null;
@@ -278,7 +306,7 @@ export function detectProjectContext(cwd = process.cwd(), explicitProject = null
           entry: savedCfg.backend.entry || null,
           prefix: savedCfg.backend.prefix || '/api',
           functionName: savedCfg.backend.functionName || `myship-${project}`.slice(0, 56),
-          gatewayToken: savedCfg.backend.gatewayToken || null,
+          gatewayToken: savedCfg.backend.gatewayToken || localSecrets.gatewayToken || null,
           role: savedCfg.backend.role || null,
         }
       : null;
@@ -311,14 +339,39 @@ export function detectProjectContext(cwd = process.cwd(), explicitProject = null
 export function ensureProjectConfig(cwd = process.cwd(), overrides = {}) {
   const ctx = detectProjectContext(cwd);
   ensureMyShipGitignore(ctx.myshipDir);
+  let diskBackendGatewayToken = null;
+  if (existsSync(ctx.projectJsonPath)) {
+    try {
+      const diskCfg = JSON.parse(readFileSync(ctx.projectJsonPath, 'utf8'));
+      if (diskCfg?.backend?.gatewayToken) {
+        diskBackendGatewayToken = diskCfg.backend.gatewayToken;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   const nextProject = overrides.project ? normalizeDomainToken(overrides.project) : ctx.project;
   const projectChanged = Boolean(overrides.project && nextProject !== ctx.project);
-  const nextBackend =
+  const rawNextBackend =
     overrides.backend !== undefined
       ? overrides.backend
       : ctx.backend
       ? { ...ctx.backend }
       : undefined;
+
+  let nextBackendForDisk = rawNextBackend ? { ...rawNextBackend } : undefined;
+  if (nextBackendForDisk && nextBackendForDisk.gatewayToken) {
+    saveLocalProjectSecrets(cwd, { gatewayToken: nextBackendForDisk.gatewayToken });
+    if (diskBackendGatewayToken) {
+      nextBackendForDisk.gatewayToken = diskBackendGatewayToken;
+    } else {
+      delete nextBackendForDisk.gatewayToken;
+    }
+  } else if (nextBackendForDisk && nextBackendForDisk.gatewayToken === null) {
+    delete nextBackendForDisk.gatewayToken;
+  }
+
   const nextResources =
     overrides.resources !== undefined
       ? overrides.resources
@@ -333,12 +386,18 @@ export function ensureProjectConfig(cwd = process.cwd(), overrides = {}) {
       : projectChanged || !ctx.hasSavedConfig
       ? nextProject
       : ctx.prodDomain,
-    ...(nextBackend ? { backend: nextBackend } : {}),
+    ...(nextBackendForDisk ? { backend: nextBackendForDisk } : {}),
     ...(nextResources && Object.keys(nextResources).length > 0 ? { resources: nextResources } : {}),
     updatedAt: new Date().toISOString(),
   };
   writeFileSync(ctx.projectJsonPath, JSON.stringify(payload, null, 2), 'utf8');
-  return { ...ctx, ...payload, hasSavedConfig: true, configSource: '.myship/project.json' };
+  return {
+    ...ctx,
+    ...payload,
+    ...(rawNextBackend ? { backend: rawNextBackend } : {}),
+    hasSavedConfig: true,
+    configSource: '.myship/project.json',
+  };
 }
 
 export function appendLocalProjectHistory(cwd, entry) {

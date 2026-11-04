@@ -28,6 +28,7 @@ import {
   loadCasStateSnapshot,
   detectProjectContext,
   ensureProjectConfig,
+  saveLocalProjectSecrets,
 } from './project-context.mjs';
 import {
   syncCloudEnvsPool,
@@ -537,16 +538,18 @@ export async function deployRemoteDirectory(
     });
 
     if (!projCtx.backend?.gatewayToken && backendManifestInfo.gatewayToken) {
-      ensureProjectConfig(cwd, {
-        project,
-        backend: {
-          ...effectiveBackendConfig,
-          enabled: true,
-          functionName: backendManifestInfo.functionName,
-          region: backendManifestInfo.region,
-          gatewayToken: backendManifestInfo.gatewayToken,
-        },
-      });
+      saveLocalProjectSecrets(cwd, { gatewayToken: backendManifestInfo.gatewayToken });
+      if (!projCtx.hasSavedConfig) {
+        ensureProjectConfig(cwd, {
+          project,
+          backend: {
+            ...effectiveBackendConfig,
+            enabled: true,
+            functionName: backendManifestInfo.functionName,
+            region: backendManifestInfo.region,
+          },
+        });
+      }
     }
   }
 

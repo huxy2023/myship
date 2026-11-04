@@ -528,8 +528,6 @@ export async function deployScfBackendVersion({
   const cleanProj = normalizeDomainToken(project) || 'default';
   const region = backendConfig.region || inferCosRegion();
   const functionName = backendConfig.functionName || resolveScfFunctionName(cleanProj);
-  const gatewayToken =
-    backendConfig.gatewayToken || `msgt_${randomBytes(16).toString('hex')}`;
   const prefix = backendConfig.prefix || '/api';
 
   // 1. 前置权限与服务连通性预检
@@ -544,6 +542,45 @@ export async function deployScfBackendVersion({
       ].join('\n')
     );
   }
+
+  // 预检目标 SCF 云函数是否已存在，若已存在且本地未携带 gatewayToken (例如在全新 CI 环境)，自动继承云端已有 MYSHIP_GATEWAY_TOKEN
+  let fnExists = false;
+  let existingRemoteGatewayToken = null;
+  for (let delWait = 0; delWait < 20; delWait++) {
+    try {
+      const fnInfo = await scfRequest(
+        'GetFunction',
+        { FunctionName: functionName, ShowCode: 'FALSE' },
+        region
+      );
+      if (fnInfo.Status && String(fnInfo.Status).includes('Deleting')) {
+        await sleep(1000);
+        continue;
+      }
+      fnExists = true;
+      const existingVars = Array.isArray(fnInfo?.Environment?.Variables)
+        ? fnInfo.Environment.Variables
+        : [];
+      const tokItem = existingVars.find((v) => v && v.Key === 'MYSHIP_GATEWAY_TOKEN');
+      if (tokItem && tokItem.Value) {
+        existingRemoteGatewayToken = String(tokItem.Value);
+      }
+      break;
+    } catch (err) {
+      if (err.code !== 'ResourceNotFound.Function') {
+        throw err;
+      }
+      fnExists = false;
+      break;
+    }
+  }
+
+  const gatewayToken =
+    backendConfig.gatewayToken ||
+    envVars.MYSHIP_GATEWAY_TOKEN ||
+    process.env.MYSHIP_GATEWAY_TOKEN ||
+    existingRemoteGatewayToken ||
+    `msgt_${randomBytes(16).toString('hex')}`;
 
   // 2. 方案 C：保留项目多文件工程结构 + 按需提取收敛第三方 npm 依赖
   console.log(`📦 正在构建项目 [${cleanProj}] 的全栈后端工程包 (保留源码目录树 + 按需提取依赖)...`);
@@ -622,29 +659,6 @@ export async function deployScfBackendVersion({
   const zipBase64 = bundleRes.zipBuffer.toString('base64');
 
   // 4. 创建或更新 SCF Web 函数 ($LATEST)
-  let fnExists = false;
-  for (let delWait = 0; delWait < 20; delWait++) {
-    try {
-      const fnInfo = await scfRequest(
-        'GetFunction',
-        { FunctionName: functionName, ShowCode: 'FALSE' },
-        region
-      );
-      if (fnInfo.Status && String(fnInfo.Status).includes('Deleting')) {
-        await sleep(1000);
-        continue;
-      }
-      fnExists = true;
-      break;
-    } catch (err) {
-      if (err.code !== 'ResourceNotFound.Function') {
-        throw err;
-      }
-      fnExists = false;
-      break;
-    }
-  }
-
   if (!fnExists) {
     console.log(`🚀 正在创建项目专属 SCF Web 云函数: ${functionName} (${region})...`);
     const runtimesToTry = ['Nodejs24.11', 'Nodejs18.15'];
