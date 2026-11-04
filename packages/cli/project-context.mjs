@@ -517,3 +517,19 @@ export async function loadCasStateSnapshot({
     allAliases,
   };
 }
+
+const KEY_WRITE_LOCKS = new Map();
+
+export async function withKeyWriteLock(lockKey, taskFn) {
+  const prev = KEY_WRITE_LOCKS.get(lockKey) || Promise.resolve();
+  const next = prev.catch(() => {}).then(taskFn);
+  const tail = next
+    .catch(() => {})
+    .finally(() => {
+      if (KEY_WRITE_LOCKS.get(lockKey) === tail) {
+        KEY_WRITE_LOCKS.delete(lockKey);
+      }
+    });
+  KEY_WRITE_LOCKS.set(lockKey, tail);
+  return next;
+}

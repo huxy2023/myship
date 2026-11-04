@@ -181,8 +181,14 @@ export function buildConsoleClientScript(safeProj = 'default') {
           .map((p) => {
             const active = p.name === proj.name ? 'active' : '';
             const latestM = p.manifests && p.manifests[0];
-            const hasScf = latestM && latestM.backend && latestM.backend.mode === 'scf-web';
-            const tagHtml = hasScf
+            const hasScf =
+              latestM &&
+              latestM.backend &&
+              (latestM.backend.mode === 'scf-web' || latestM.backend.provider === 'scf');
+            const isPaused = Boolean(p.projectDisabled);
+            const tagHtml = isPaused
+              ? '<span class="badge warn" style="font-size:10px;padding:1px 6px;">⏸️ 下线</span>'
+              : hasScf
               ? '<span class="badge purple" style="font-size:10px;padding:1px 6px;">SCF</span>'
               : '<span class="badge" style="font-size:10px;padding:1px 6px;">' + p.manifests.length + '</span>';
             return (
@@ -259,8 +265,25 @@ export function buildConsoleClientScript(safeProj = 'default') {
           : '-';
       }
 
+      const isProjOffline = Boolean(
+        proj.projectDisabled ||
+          proj.aliases.some((a) => a.projectDisabled === true) ||
+          proj.manifests.some((m) => m.projectDisabled === true)
+      );
+      const heroAvailBadge = document.getElementById('heroAvailabilityBadge');
+      if (heroAvailBadge) {
+        heroAvailBadge.className = isProjOffline ? 'badge warn' : 'badge success';
+        heroAvailBadge.textContent = isProjOffline ? '⏸️ 已下线暂停' : '🟢 在线运行';
+      }
+      const heroToggleBtn = document.getElementById('heroToggleAvailabilityBtn');
+      if (heroToggleBtn) {
+        heroToggleBtn.className = isProjOffline ? 'primary' : '';
+        heroToggleBtn.textContent = isProjOffline ? '🟢 恢复全站上线' : '⏸️ 暂停全站访问';
+      }
+
       // 1. 填充自定义域名绑定下拉框与域名路由表
       const dplOptionsHtml = proj.manifests
+        .filter((m) => m.disabled !== true)
         .map(
           (m) =>
             '<option value="' +
@@ -289,9 +312,22 @@ export function buildConsoleClientScript(safeProj = 'default') {
                 ? ' <span class="badge success">主域名</span>'
                 : ' <span class="badge">环境别名</span>';
               const targetM = proj.manifests.find((m) => m.id === a.deploymentId);
+              const isAliasPaused = Boolean(a.disabled === true);
+              const isTargetDisabled = Boolean(targetM && targetM.disabled === true);
+              const statusTag = isProjOffline
+                ? ' <span class="badge warn">⏸️ 项目下线</span>'
+                : isAliasPaused
+                ? ' <span class="badge danger">⏸️ 已下线</span>'
+                : isTargetDisabled
+                ? ' <span class="badge danger">🚫 指向禁用版本</span>'
+                : '';
               const scfTag =
-                targetM && targetM.backend && targetM.backend.version
-                  ? ' <span class="badge purple">SCF v' + esc(targetM.backend.version) + '</span>'
+                targetM &&
+                targetM.backend &&
+                (targetM.backend.version || targetM.backend.scfVersion)
+                  ? ' <span class="badge purple">SCF v' +
+                    esc(targetM.backend.version || targetM.backend.scfVersion) +
+                    '</span>'
                   : '';
               return (
                 '<tr>' +
@@ -301,6 +337,7 @@ export function buildConsoleClientScript(safeProj = 'default') {
                 esc(url) +
                 '</strong> ↗</a>' +
                 badgeHtml +
+                statusTag +
                 '</td>' +
                 '<td><code>' +
                 esc(a.deploymentId) +
@@ -311,6 +348,13 @@ export function buildConsoleClientScript(safeProj = 'default') {
                 esc((a.updatedAt || '-').replace('T', ' ').slice(0, 19)) +
                 '</td>' +
                 '<td class="row-actions">' +
+                '<button onclick="toggleAliasAvailability(\\'' +
+                esc(a.subdomain) +
+                '\\', ' +
+                (isAliasPaused ? 'true' : 'false') +
+                ')">' +
+                (isAliasPaused ? '🟢 恢复上线' : '⏸️ 暂停访问') +
+                '</button>' +
                 '<button onclick="rollbackSubdomain(\\'' +
                 esc(a.subdomain) +
                 '\\', \\'' +
@@ -341,12 +385,16 @@ export function buildConsoleClientScript(safeProj = 'default') {
               const filesCount = Object.keys(m.files || {}).length;
               const fnsRoutes = Object.keys(m.functions || {});
               const isLiveProd = primaryAlias && primaryAlias.deploymentId === m.id;
+              const isDplDisabled = Boolean(m.disabled === true);
 
               let computeBadges = '';
-              if (m.backend && m.backend.mode === 'scf-web') {
+              if (
+                m.backend &&
+                (m.backend.mode === 'scf-web' || m.backend.provider === 'scf')
+              ) {
                 computeBadges +=
                   '<span class="badge purple">🏭 SCF @v' +
-                  esc(m.backend.version || '$LATEST') +
+                  esc(m.backend.version || m.backend.scfVersion || '$LATEST') +
                   '</span> ';
               }
               if (fnsRoutes.length > 0) {
@@ -363,7 +411,8 @@ export function buildConsoleClientScript(safeProj = 'default') {
                 esc(m.id) +
                 '</code> ' +
                 (idx === 0 ? '<span class="badge">最新</span> ' : '') +
-                (isLiveProd ? '<span class="badge success">LIVE 生产</span>' : '') +
+                (isLiveProd ? '<span class="badge success">LIVE 生产</span> ' : '') +
+                (isDplDisabled ? '<span class="badge danger">🚫 已禁用</span>' : '') +
                 '</td>' +
                 '<td><a href="' +
                 esc(immUrl) +
@@ -385,9 +434,18 @@ export function buildConsoleClientScript(safeProj = 'default') {
                 '<button onclick="openSnapshotDrawer(\\'' +
                 esc(m.id) +
                 '\\')">🔍 详情抽屉</button>' +
-                '<button class="primary" onclick="promoteToPrimary(\\'' +
+                (isDplDisabled
+                  ? ''
+                  : '<button class="primary" onclick="promoteToPrimary(\\'' +
+                    esc(m.id) +
+                    '\\')">⚡ 切流到主域名</button>') +
+                '<button onclick="toggleDeploymentAvailability(\\'' +
                 esc(m.id) +
-                '\\')">⚡ 切流到主域名</button>' +
+                '\\', ' +
+                (isDplDisabled ? 'true' : 'false') +
+                ')">' +
+                (isDplDisabled ? '🟢 解除禁用' : '🚫 禁用版本') +
+                '</button>' +
                 '<button class="danger" onclick="deleteSnapshot(\\'' +
                 esc(m.id) +
                 '\\')">🗑️</button>' +
@@ -894,6 +952,68 @@ export function buildConsoleClientScript(safeProj = 'default') {
             showToast('删除拦截: ' + err.message, true);
           }
         },
+      });
+    }
+
+    function confirmAvailabilityToggle({ isOffline, title, desc, confirmLabel, payload, toastMsg }) {
+      askConfirmation({
+        title,
+        desc,
+        confirmLabel,
+        danger: !isOffline,
+        onConfirm: async () => {
+          try {
+            await api('/api/console/availability', {
+              method: 'POST',
+              body: JSON.stringify(payload),
+            });
+            showToast(toastMsg);
+            await refreshAll();
+          } catch (err) {
+            showToast('操作失败: ' + err.message, true);
+          }
+        },
+      });
+    }
+
+    function toggleProjectAvailability() {
+      const proj = getActiveProjectObj();
+      const isOff = Boolean(
+        proj.projectDisabled ||
+          proj.aliases.some((a) => a.projectDisabled === true) ||
+          proj.manifests.some((m) => m.projectDisabled === true)
+      );
+      confirmAvailabilityToggle({
+        isOffline: isOff,
+        title: (isOff ? '🟢 确认恢复项目 [' : '⏸️ 确认暂停项目 [') + proj.name + '] 访问？',
+        desc: isOff
+          ? '即将恢复项目 <code>' + esc(proj.name) + '</code> 的对外访问（此前单独封禁的版本仍保持禁用）。'
+          : '即将暂停项目 <code>' + esc(proj.name) + '</code> 下所有子域名与预览地址服务（返回 503，保留云资源与数据，可随时一键恢复）。',
+        confirmLabel: isOff ? '🟢 立即恢复上线' : '⏸️ 立即暂停访问',
+        payload: { action: isOff ? 'online' : 'offline', project: proj.name },
+        toastMsg: (isOff ? '🟢 项目 [' : '⏸️ 项目 [') + proj.name + (isOff ? '] 已恢复上线' : '] 已暂停全站访问'),
+      });
+    }
+
+    function toggleAliasAvailability(subdomain, isOff) {
+      confirmAvailabilityToggle({
+        isOffline: isOff,
+        title: (isOff ? '🟢 确认恢复子域名 [' : '⏸️ 确认暂停子域名 [') + subdomain + '] 访问？',
+        desc: '子域名 <code>' + esc(subdomain) + '</code> ' + (isOff ? '将恢复正常访问。' : '将暂停访问并返回 503（保留绑定指针，可随时恢复）。'),
+        confirmLabel: isOff ? '🟢 恢复上线' : '⏸️ 暂停访问',
+        payload: { action: isOff ? 'online' : 'offline', project: S.selectedProject, subdomain, raw: true },
+        toastMsg: (isOff ? '🟢 已恢复子域名: ' : '⏸️ 已暂停子域名: ') + subdomain,
+      });
+    }
+
+    function toggleDeploymentAvailability(dplId, isOff) {
+      confirmAvailabilityToggle({
+        isOffline: isOff,
+        title: (isOff ? '🟢 确认解除版本 [' : '🚫 确认禁用构建版本 [') + dplId + ']？',
+        desc: '构建版本 <code>' + esc(dplId) + '</code> ' + (isOff ? '将解除禁用。' : '禁用后其预览地址及指向它的子域名均返回 503，且回滚时自动跳过。'),
+        confirmLabel: isOff ? '🟢 解除禁用' : '🚫 确认禁用版本',
+        payload: { action: isOff ? 'online' : 'offline', project: S.selectedProject, deploymentId: dplId },
+        toastMsg: (isOff ? '🟢 已解除禁用: ' : '🚫 已禁用构建版本: ') + dplId,
       });
     }
 

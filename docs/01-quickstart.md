@@ -15,6 +15,7 @@
 | **边缘 Serverless 函数** | `api/**/*.js` 零配置自动路由与 V8 寻址 | ✅ | ✅ | 自动识别 `api/*.js` 映射为 `/api/*` 接口，运行于 EdgeOne 全球边缘 V8 Isolate |
 | **SCF 全栈 Node.js 后端** | `myship backend enable` + `server/index.mjs` | ✅ | ✅ | 完整 Node.js 24/20 运行时、Hono/Web Fetch 框架、`esbuild` 内联 SourceMap 与不可变 SCF 版本绑定 |
 | **声明式云资源编排** | `myship use` 交互式注入文件存储与五大数据库 | ✅ | ✅ | 一行命令开通并注入 `context.files`（COS 预签名直传）与 `context.db`（PG / Neon / Turso / D1 / MySQL） |
+| **可逆上下线与版本封禁** | `myship offline` / `online` (`pause`/`resume`/`disable`/`enable`) | ✅ | ✅ | 支持整项目、单子域名或指定构建版本 (`dpl_xxx`) 秒级下线维护（返回 `503`）与无损恢复，保留全部云资源与数据 |
 | **生命周期与可视化管控** | `myship gc` / `rm` / `logs` / `console` / `init --ci` | ✅ | ✅ | 引用计数安全回收、云端源码级错误日志聚合、GitHub PR 预览机器人与本机 Web 管控台 |
 
 ---
@@ -128,7 +129,27 @@ myship rollback v2
 myship alias v2 dpl_6e46ed99
 ```
 
-### 5. 垃圾回收 (`myship gc`) 与资源精确销毁 (`myship rm`)
+### 5. 可逆上下线维护 (`myship offline` / `online`) 与漏洞版本封禁
+
+当你需要临时关停项目进行维护、暂停某个测试子域名，或封禁某个存在 Bug 的历史构建快照（而不想像 `myship rm` 那样物理删除文件和云资源）时，可使用可逆上下线命令（同时支持 `pause` / `resume` / `disable` / `enable` 同义词）：
+
+```bash
+# 1. 整项目一键下线维护（封锁该项目所有子域名与不可变预览直链，边缘返回 503 维护页/JSON）
+myship offline --reason "系统升级维护中，预计 10 分钟恢复"
+
+# 随时一键恢复项目上线（自动保留此前被单独封禁的缺陷版本；如需连同单点禁用一并解封可加 --all）
+myship online
+
+# 2. 仅暂停/恢复指定子域名（不影响生产主域名与其他环境）
+myship offline --alias v2 --reason "测试环境暂停开放"
+myship online --alias v2
+
+# 3. 精准封禁/解封指定历史构建版本（dpl_xxx 不可变直链同步拦截，且 myship rollback 自动跳过禁用版本）
+myship offline dpl_6e46ed99 --reason "修复配置泄漏"
+myship online dpl_6e46ed99
+```
+
+### 6. 垃圾回收 (`myship gc`) 与资源精确销毁 (`myship rm`)
 
 ```bash
 # 预览可清理的过期历史快照、无引用孤儿静态块与废弃函数版本（不执行删除）
@@ -144,13 +165,13 @@ myship rm --alias pr-1
 myship rm --project old-demo
 ```
 
-### 6. GitHub Actions 自动部署与 PR 预览 (`myship init --ci`) 及 Web 管控台 (`myship console`)
+### 7. GitHub Actions 自动部署与 PR 预览 (`myship init --ci`) 及 Web 管控台 (`myship console`)
 
 ```bash
 # 一键生成 .github/workflows/myship.yml 并通过 gh CLI 自动同步仓库 Secrets
 myship init --ci --sync-secrets
 
-# 启动本机 127.0.0.1:4200 可视化 Web 管控台（支持鼠标点击切流/回滚/双版本 SHA-256 Diff/环境变量/GC）
+# 启动本机 127.0.0.1:4200 可视化 Web 管控台（支持鼠标点击切流/回滚/上下线维护/双版本 SHA-256 Diff/环境变量/GC）
 myship console
 ```
 

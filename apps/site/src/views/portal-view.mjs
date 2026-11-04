@@ -17,7 +17,7 @@ export function renderPortalView() {
             <span>10 分钟搭一套私人全栈云平台。</span>
           </h1>
           <p class="hero-desc">
-            <strong>MyShip</strong> 是开源 BYOC 全栈部署与资源编排引擎。通过 <code>.myship/project.json</code> 自动隔离多项目命名空间，支持 SHA-256 块级去重、边缘与 SCF 双引擎后端、<code>myship use</code> 一键接入五大数据库及 0 秒原子回滚。
+            <strong>MyShip</strong> 是开源 BYOC 全栈部署与资源编排引擎。通过 <code>.myship/project.json</code> 自动隔离多项目命名空间，支持 SHA-256 块级去重、边缘与 SCF 双引擎后端、<code>myship use</code> 一键接入五大数据库、0 秒原子回滚及 <code>myship offline/online</code> 可逆上下线维护。
           </p>
           <div class="hero-actions">
             <button type="button" class="btn-primary" data-switch-doc="self-hosting">

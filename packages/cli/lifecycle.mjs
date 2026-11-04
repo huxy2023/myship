@@ -8,6 +8,7 @@ import {
 import { resolve, basename } from 'node:path';
 import {
   cosHeadObject,
+  cosGetJson,
   cosPutObject,
   cosDeleteObject,
   deployProjectApiFunctionToTeo,
@@ -20,6 +21,7 @@ import {
   resolveNamespacedSubdomain,
   inferProjectFromRecord,
   loadCasStateSnapshot,
+  withKeyWriteLock,
 } from './project-context.mjs';
 import {
   loadLocalEnvsPool,
@@ -674,5 +676,254 @@ export async function removeResources({
     orphanBlobsCount: orphanPlan.orphanBlobKeys.length,
     orphanFnsCount: orphanPlan.orphanFnKeys.length,
     activeRoutes: orphanPlan.activeRoutes,
+  };
+}
+
+/**
+ * 可逆上下线与版本禁用控制 (支持项目级 / 子域名级 / 单构建版本级)
+ * - 项目级 (scope = 'project'): 设置/清除 projectDisabled* 字段，恢复上线时不会误解封此前单独被禁用的高危旧版本或子域名 (除非传 all=true)
+ * - 子域名级 (scope = 'alias'): 设置/清除 aliases/<sub>.json 上的 disabled* 字段
+ * - 版本级 (scope = 'deployment'): 设置/清除 manifests/<dpl_id>.json 上的 disabled* 字段
+ */
+export async function setAvailabilityState({
+  action = 'offline',
+  project = null,
+  explicitProject = null,
+  aliases = [],
+  deploymentIds = [],
+  reason = null,
+  all = false,
+  raw = false,
+  isLocal = false,
+  storageDir = DEFAULT_STORAGE_DIR,
+} = {}) {
+  const cleanAction = String(action || '').toLowerCase() === 'online' ? 'online' : 'offline';
+  const cleanProj = project ? normalizeDomainToken(project) : null;
+  const cleanExplicitProj = explicitProject ? normalizeDomainToken(explicitProject) : null;
+  const cleanReason = reason && String(reason).trim() ? String(reason).trim() : null;
+  const nowIso = new Date().toISOString();
+
+  const { allManifests, allAliases, domainSuffix, protocol } = await loadCasStateSnapshot({
+    isLocal,
+    storageDir,
+    includeFunctionsKeys: false,
+    actionLabel: cleanAction === 'offline' ? '下线/禁用' : '上线/恢复',
+  });
+
+  async function persistRecords(manifestsToMutate, aliasesToMutate, mutateRecord) {
+    const savedManifests = [];
+    const savedAliases = [];
+    const tasks = [
+      ...manifestsToMutate.map((m) => ({
+        kind: 'manifest',
+        key: `manifests/${m.id}.json`,
+        filePath: resolve(storageDir, 'manifests', `${m.id}.json`),
+        snapshot: m,
+      })),
+      ...aliasesToMutate.map((a) => ({
+        kind: 'alias',
+        key: `aliases/${a.subdomain}.json`,
+        filePath: resolve(storageDir, 'aliases', `${a.subdomain}.json`),
+        snapshot: a,
+      })),
+    ];
+
+    if (isLocal) {
+      for (const item of tasks) {
+        const updated = await withKeyWriteLock(`local:${item.filePath}`, async () => {
+          let current = item.snapshot;
+          if (existsSync(item.filePath)) {
+            try {
+              const parsed = JSON.parse(readFileSync(item.filePath, 'utf8'));
+              if (parsed && typeof parsed === 'object') current = parsed;
+            } catch {
+              // fallback to snapshot
+            }
+          }
+          const patched = mutateRecord({ ...current }, item.kind);
+          writeFileSync(item.filePath, JSON.stringify(patched, null, 2), 'utf8');
+          return patched;
+        });
+        if (item.kind === 'manifest') savedManifests.push(updated);
+        else savedAliases.push(updated);
+      }
+      return { savedManifests, savedAliases };
+    }
+
+    const results = new Array(tasks.length);
+    let cursor = 0;
+    async function worker() {
+      while (cursor < tasks.length) {
+        const idx = cursor++;
+        const item = tasks[idx];
+        results[idx] = await withKeyWriteLock(`remote:${item.key}`, async () => {
+          const latest = await cosGetJson(item.key).catch(() => null);
+          const baseRecord = latest && typeof latest === 'object' ? latest : item.snapshot;
+          const patched = mutateRecord({ ...baseRecord }, item.kind);
+          await cosPutObject(
+            item.key,
+            JSON.stringify(patched, null, 2),
+            'application/json; charset=UTF-8'
+          );
+          return patched;
+        });
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(6, tasks.length) }, () => worker()));
+    for (let i = 0; i < tasks.length; i++) {
+      if (tasks[i].kind === 'manifest') savedManifests.push(results[i]);
+      else savedAliases.push(results[i]);
+    }
+    return { savedManifests, savedAliases };
+  }
+
+  function applyFlagMutation(copy, prefix, defaultReasonText) {
+    const flagKey = prefix === 'project' ? 'projectDisabled' : 'disabled';
+    const otherKey = prefix === 'project' ? 'disabled' : 'projectDisabled';
+    if (cleanAction === 'offline') {
+      copy[flagKey] = true;
+      copy[`${flagKey}Reason`] = cleanReason || defaultReasonText;
+      copy[`${flagKey}At`] = nowIso;
+    } else {
+      delete copy[flagKey];
+      delete copy[`${flagKey}Reason`];
+      delete copy[`${flagKey}At`];
+      if (all) {
+        delete copy[otherKey];
+        delete copy[`${otherKey}Reason`];
+        delete copy[`${otherKey}At`];
+      }
+    }
+    return copy;
+  }
+
+  // 模式 1：针对指定构建版本 (dpl_xxx) 禁用或启用
+  if (deploymentIds.length > 0) {
+    const uniqueIds = Array.from(new Set(deploymentIds.map((id) => String(id || '').trim()).filter(Boolean)));
+    const targetManifests = [];
+    for (const dplId of uniqueIds) {
+      if (!/^dpl_[a-zA-Z0-9_-]+$/.test(dplId)) {
+        throw new Error(`无效的构建版本 ID: ${dplId}`);
+      }
+      const found = allManifests.find((m) => m && m.id === dplId);
+      if (!found) {
+        throw new Error(`未找到构建版本快照: ${dplId}`);
+      }
+      const mProj = inferProjectFromRecord(found, 'default');
+      if (cleanExplicitProj && mProj !== cleanExplicitProj) {
+        throw new Error(
+          `构建版本 [${dplId}] 属于项目 [${mProj}]，不属于指定项目 [${cleanExplicitProj}]`
+        );
+      }
+      targetManifests.push(found);
+    }
+
+    const { savedManifests } = await persistRecords(targetManifests, [], (rec) =>
+      applyFlagMutation(rec, 'single', '当前构建版本已被管理员禁用')
+    );
+    const idsStr = savedManifests.map((m) => m.id).join(', ');
+    console.log(
+      cleanAction === 'offline'
+        ? `⏸️  已禁用构建版本: ${idsStr} (原因: ${cleanReason || '当前构建版本已被管理员禁用'})`
+        : `🟢 已恢复启用构建版本: ${idsStr}`
+    );
+    return {
+      action: cleanAction,
+      scope: 'deployment',
+      updatedManifests: savedManifests.map((m) => m.id),
+      updatedAliases: [],
+    };
+  }
+
+  // 模式 2：针对指定子域名 (--alias <sub>) 下线或上线
+  if (aliases.length > 0) {
+    const resolvedSubs = Array.from(
+      new Set(
+        aliases
+          .map((s) => (raw ? normalizeSubdomain(s) : resolveNamespacedSubdomain(s, cleanProj, false)))
+          .filter(Boolean)
+      )
+    );
+    const targetAliases = [];
+    for (const sub of resolvedSubs) {
+      const found = allAliases.find((a) => a && a.subdomain === sub);
+      if (!found) throw new Error(`未找到子域名绑定记录: ${sub}`);
+      if (!raw && cleanExplicitProj && found.project && found.project !== cleanExplicitProj) {
+        throw new Error(`子域名 [${sub}] 属于项目 [${found.project}]，不属于指定项目 [${cleanExplicitProj}]`);
+      }
+      targetAliases.push(found);
+    }
+
+    const { savedAliases } = await persistRecords([], targetAliases, (rec) =>
+      applyFlagMutation(rec, 'single', '当前子域名已暂停访问')
+    );
+    const urls = savedAliases.map((a) => `${protocol}://${a.subdomain}.${domainSuffix}`).join(', ');
+    console.log(
+      cleanAction === 'offline'
+        ? `⏸️  子域名已下线暂停访问: ${urls} (原因: ${cleanReason || '当前子域名已暂停访问'})`
+        : `🟢 子域名已恢复上线: ${urls}`
+    );
+    return {
+      action: cleanAction,
+      scope: 'alias',
+      updatedManifests: [],
+      updatedAliases: savedAliases.map((a) => a.subdomain),
+    };
+  }
+
+  // 模式 3：针对整个项目 (project) 一键下线或恢复上线
+  const targetProj = cleanExplicitProj || cleanProj;
+  if (!targetProj) {
+    throw new Error('请指定项目名称、子域名 (--alias) 或构建版本 ID (dpl_xxx)');
+  }
+
+  const projManifests = allManifests.filter((m) => m && inferProjectFromRecord(m, 'default') === targetProj);
+  const projDplSet = new Set(projManifests.map((m) => m.id));
+  const projAliases = allAliases.filter((a) => {
+    if (!a || !a.subdomain) return false;
+    const aProj =
+      a.project || (projDplSet.has(a.deploymentId) ? targetProj : inferProjectFromRecord(a, 'default'));
+    return aProj === targetProj || projDplSet.has(a.deploymentId);
+  });
+
+  if (projManifests.length === 0 && projAliases.length === 0) {
+    throw new Error(`未找到项目 [${targetProj}] 的任何构建快照或子域名记录`);
+  }
+
+  const { savedManifests: updatedManifests, savedAliases: updatedAliases } =
+    await persistRecords(projManifests, projAliases, (rec) =>
+      applyFlagMutation(rec, 'project', '站点维护中 / 管理员已暂停访问')
+    );
+
+  const retainedIndividualDisabledCount =
+    cleanAction === 'online' && !all
+      ? updatedManifests.filter((m) => m.disabled === true).length +
+        updatedAliases.filter((a) => a.disabled === true).length
+      : 0;
+
+  if (cleanAction === 'offline') {
+    console.log(
+      `⏸️  项目 [${targetProj}] 已全量下线暂停访问！(已封锁 ${updatedAliases.length} 个子域名与 ${updatedManifests.length} 个构建版本，原因: ${
+        cleanReason || '站点维护中 / 管理员已暂停访问'
+      })`
+    );
+    console.log(`   💡 如需恢复上线，随时执行: myship online ${targetProj}`);
+  } else {
+    console.log(
+      `🟢 项目 [${targetProj}] 已恢复上线！(已恢复 ${updatedAliases.length} 个子域名与 ${updatedManifests.length} 个构建版本)`
+    );
+    if (retainedIndividualDisabledCount > 0) {
+      console.log(
+        `   ℹ️  注: 保留了 ${retainedIndividualDisabledCount} 个此前被单独禁用的版本/子域名；如需全部解封可加 --all。`
+      );
+    }
+  }
+
+  return {
+    action: cleanAction,
+    scope: 'project',
+    project: targetProj,
+    updatedManifests: updatedManifests.map((m) => m.id),
+    updatedAliases: updatedAliases.map((a) => a.subdomain),
   };
 }

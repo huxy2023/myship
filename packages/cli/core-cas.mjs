@@ -26,6 +26,7 @@ import {
   appendLocalProjectHistory,
   inferProjectFromRecord,
   loadCasStateSnapshot,
+  withKeyWriteLock,
   detectProjectContext,
   ensureProjectConfig,
   saveLocalProjectSecrets,
@@ -164,6 +165,19 @@ export function deployDirectory(
   const immutableSubdomain =
     project && project !== 'default' ? `${project}-${shortHash}` : `dpl-${shortHash}`;
 
+  let inheritedProjectDisabled = null;
+  try {
+    for (const f of readdirSync(resolve(storageDir, 'manifests')).filter((x) => x.endsWith('.json'))) {
+      const m = JSON.parse(readFileSync(resolve(storageDir, 'manifests', f), 'utf8'));
+      if (m && inferProjectFromRecord(m, 'default') === project && m.projectDisabled === true) {
+        inheritedProjectDisabled = pickAvailabilityFields(m);
+        break;
+      }
+    }
+  } catch {
+    // ignore
+  }
+
   const manifest = {
     id: deploymentId,
     project,
@@ -182,6 +196,7 @@ export function deployDirectory(
       : null,
     files: manifestFiles,
     functions: manifestFunctions,
+    ...(inheritedProjectDisabled || {}),
   };
 
   const manifestPath = resolve(storageDir, 'manifests', `${deploymentId}.json`);
@@ -217,6 +232,44 @@ export function deployDirectory(
   return { deploymentId, immutableSubdomain, boundUrls, manifest };
 }
 
+function pickAvailabilityFields(rec, { includeIndividual = false } = {}) {
+  const out = {};
+  if (!rec || typeof rec !== 'object') return out;
+  if (includeIndividual && rec.disabled === true) {
+    out.disabled = true;
+    if (rec.disabledReason) out.disabledReason = rec.disabledReason;
+    if (rec.disabledAt) out.disabledAt = rec.disabledAt;
+  }
+  if (rec.projectDisabled === true) {
+    out.projectDisabled = true;
+    if (rec.projectDisabledReason) out.projectDisabledReason = rec.projectDisabledReason;
+    if (rec.projectDisabledAt) out.projectDisabledAt = rec.projectDisabledAt;
+  }
+  return out;
+}
+
+function selectRollbackCandidateManifest(pool, currentDplId, previousDplId) {
+  const currentIdx = pool.findIndex((m) => m.id === currentDplId);
+  const byPrevious = previousDplId
+    ? pool.find((m) => m.id === previousDplId && m.id !== currentDplId && m.disabled !== true)
+    : null;
+  const olderEligible =
+    currentIdx >= 0 ? pool.slice(currentIdx + 1).find((m) => m.disabled !== true) : null;
+  const candidate =
+    byPrevious ||
+    (currentIdx >= 0 ? olderEligible : pool.find((m) => m.id !== currentDplId && m.disabled !== true));
+  if (!candidate) {
+    const candidateOlder = currentIdx >= 0 ? pool.slice(currentIdx + 1) : pool;
+    if (candidateOlder.some((m) => m.id !== currentDplId && m.disabled === true)) {
+      throw new Error(
+        `历史候选版本均处于已禁用状态，无法自动回滚。如需回滚至特定历史版本，请先执行 \`myship online <dpl_id>\` 解除禁用。`
+      );
+    }
+    throw new Error(`当前版本 (${currentDplId}) 没有更早的可用历史版本可供回滚。`);
+  }
+  return candidate;
+}
+
 export function setAlias(
   subdomain,
   deploymentId,
@@ -232,6 +285,11 @@ export function setAlias(
     throw new Error(`目标部署版本不存在: ${deploymentId}`);
   }
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  if (manifest.disabled === true) {
+    throw new Error(
+      `目标版本 (${deploymentId}) 当前处于已禁用状态，请先执行 \`myship online ${deploymentId}\` 解除禁用后再切流`
+    );
+  }
   const manifestProj = inferProjectFromRecord(manifest, null);
   if (project && manifestProj && manifestProj !== project) {
     throw new Error(
@@ -242,6 +300,7 @@ export function setAlias(
 
   const aliasPath = resolve(storageDir, 'aliases', `${cleanSub}.json`);
   let previousDeploymentId = null;
+  let preservedStateFields = pickAvailabilityFields(manifest);
   if (existsSync(aliasPath)) {
     const existing = JSON.parse(readFileSync(aliasPath, 'utf8'));
     const existingProj = existing?.project || null;
@@ -255,6 +314,10 @@ export function setAlias(
     } else if (existing?.previousDeploymentId && existing.previousDeploymentId !== deploymentId) {
       previousDeploymentId = existing.previousDeploymentId;
     }
+    preservedStateFields = {
+      ...preservedStateFields,
+      ...pickAvailabilityFields(existing, { includeIndividual: true }),
+    };
   }
 
   const aliasData = {
@@ -262,6 +325,7 @@ export function setAlias(
     project: effectiveProject,
     deploymentId,
     ...(previousDeploymentId ? { previousDeploymentId } : {}),
+    ...preservedStateFields,
     updatedAt: new Date().toISOString(),
   };
   writeFileSync(aliasPath, JSON.stringify(aliasData, null, 2), 'utf8');
@@ -303,22 +367,11 @@ export function rollbackAlias(
   const pool = effectiveProject
     ? manifests.filter((m) => inferProjectFromRecord(m) === effectiveProject)
     : manifests;
-
-  const currentIdx = pool.findIndex((m) => m.id === currentDplId);
-  const byPrevious = currentAlias.previousDeploymentId
-    ? pool.find((m) => m.id === currentAlias.previousDeploymentId && m.id !== currentDplId)
-    : null;
-  const previousManifest =
-    byPrevious ||
-    (currentIdx >= 0 && currentIdx + 1 < pool.length
-      ? pool[currentIdx + 1]
-      : pool.find((m) => m.id !== currentDplId));
-
-  if (!previousManifest) {
-    throw new Error(
-      `当前仅有 1 个部署版本 (${currentDplId})，没有更早的历史版本可供回滚。`
-    );
-  }
+  const previousManifest = selectRollbackCandidateManifest(
+    pool,
+    currentDplId,
+    currentAlias.previousDeploymentId
+  );
 
   console.log(
     `⏪ 正在将 http://${cleanSub}.${BASE_DOMAIN} 从 ${currentDplId} 回滚至上一版本 ${previousManifest.id} (${previousManifest.createdAt})...`
@@ -705,6 +758,44 @@ export async function deployRemoteDirectory(
     );
   }
 
+  let inheritedProjectDisabled = {};
+  if (project) {
+    const candidateSubs = Array.from(
+      new Set([...mutableAliases, project !== 'default' ? project : null].filter(Boolean))
+    );
+    let checkedAnyExistingRecord = false;
+    for (const sub of candidateSubs) {
+      const rec = await cosGetJson(`aliases/${sub}.json`);
+      if (rec && typeof rec === 'object') {
+        const recProj = inferProjectFromRecord(rec, null);
+        if (!recProj || recProj === project) {
+          checkedAnyExistingRecord = true;
+          if (rec.projectDisabled === true) {
+            inheritedProjectDisabled = pickAvailabilityFields(rec);
+            break;
+          }
+        }
+      }
+    }
+    if (!checkedAnyExistingRecord && project !== 'default') {
+      try {
+        const snap = await loadCasStateSnapshot({
+          isLocal: false,
+          includeFunctionsKeys: false,
+          actionLabel: '检查项目在线状态',
+        });
+        const pausedRecord = [...snap.allAliases, ...snap.allManifests].find(
+          (r) => inferProjectFromRecord(r) === project && r.projectDisabled === true
+        );
+        if (pausedRecord) {
+          inheritedProjectDisabled = pickAvailabilityFields(pausedRecord);
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+
   const manifest = {
     id: deploymentId,
     project,
@@ -724,6 +815,7 @@ export async function deployRemoteDirectory(
     files: manifestFiles,
     functions: manifestFunctions,
     ...(backendManifestInfo ? { backend: backendManifestInfo } : {}),
+    ...inheritedProjectDisabled,
   };
 
   await cosPutObject(
@@ -735,7 +827,12 @@ export async function deployRemoteDirectory(
   const boundUrls = [`https://${immutableSubdomain}.${remoteDomain}`];
   for (const sub of mutableAliases) {
     if (!sub || sub === immutableSubdomain || sub === `dpl-${shortHash}`) continue;
-    await setRemoteAlias(sub, deploymentId, { silent: true, skipVerify: true, project });
+    await setRemoteAlias(sub, deploymentId, {
+      silent: true,
+      skipVerify: true,
+      project,
+      inheritedState: inheritedProjectDisabled,
+    });
     boundUrls.push(`https://${sub}.${remoteDomain}`);
   }
 
@@ -806,7 +903,7 @@ export async function deployRemoteDirectory(
 export async function setRemoteAlias(
   subdomain,
   deploymentId,
-  { silent = false, skipVerify = false, project = null } = {}
+  { silent = false, skipVerify = false, project = null, inheritedState = null } = {}
 ) {
   if (!/^dpl_[a-zA-Z0-9_-]+$/.test(String(deploymentId || ''))) {
     throw new Error(`无效的部署版本 ID: ${deploymentId}`);
@@ -814,12 +911,19 @@ export async function setRemoteAlias(
   const { remoteDomain } = assertCloudEndpointsConfigured();
   const cleanSub = normalizeSubdomain(subdomain);
   let inferredProject = project;
+  let verifiedManifest = null;
 
   if (!skipVerify) {
     const manifest = await cosGetJson(`manifests/${deploymentId}.json`);
     if (!manifest) {
       throw new Error(`云端 COS 中不存在目标部署版本: ${deploymentId}`);
     }
+    if (manifest.disabled === true) {
+      throw new Error(
+        `目标版本 (${deploymentId}) 当前处于已禁用状态，请先执行 \`myship online ${deploymentId}\` 解除禁用后再切流`
+      );
+    }
+    verifiedManifest = manifest;
     const manifestProj = inferProjectFromRecord(manifest, null);
     if (project && manifestProj && manifestProj !== project) {
       throw new Error(
@@ -859,12 +963,28 @@ export async function setRemoteAlias(
         protectedQualifiers,
       });
       if (ensuredUrl && ensuredUrl !== manifest.backend.upstreamUrl) {
-        manifest.backend.upstreamUrl = ensuredUrl;
-        await cosPutObject(
-          `manifests/${deploymentId}.json`,
-          JSON.stringify(manifest, null, 2),
-          'application/json; charset=UTF-8'
-        );
+        const manifestKey = `manifests/${deploymentId}.json`;
+        verifiedManifest = await withKeyWriteLock(`remote:${manifestKey}`, async () => {
+          const latestM = (await cosGetJson(manifestKey)) || manifest;
+          if (latestM.disabled === true) {
+            throw new Error(
+              `目标版本 (${deploymentId}) 当前处于已禁用状态，请先执行 \`myship online ${deploymentId}\` 解除禁用后再切流`
+            );
+          }
+          const updatedM = {
+            ...latestM,
+            backend: {
+              ...(latestM.backend || {}),
+              upstreamUrl: ensuredUrl,
+            },
+          };
+          await cosPutObject(
+            manifestKey,
+            JSON.stringify(updatedM, null, 2),
+            'application/json; charset=UTF-8'
+          );
+          return updatedM;
+        });
       }
       if (!silent) {
         console.log(
@@ -875,40 +995,49 @@ export async function setRemoteAlias(
   }
 
   const effectiveProject = inferredProject || inferProjectFromRecord({ subdomain: cleanSub });
-  let previousDeploymentId = null;
   const aliasKey = `aliases/${cleanSub}.json`;
-  const exists = await cosHeadObject(aliasKey);
-  if (exists) {
-    const existing = await cosGetJson(aliasKey);
-    if (!existing || typeof existing !== 'object') {
-      throw new Error(`读取云端现有域名指针失败 (${aliasKey})，已安全中止以防误覆盖`);
+  const aliasData = await withKeyWriteLock(`remote:${aliasKey}`, async () => {
+    let previousDeploymentId = null;
+    let preservedStateFields = pickAvailabilityFields(inheritedState || verifiedManifest);
+    const exists = await cosHeadObject(aliasKey);
+    if (exists) {
+      const existing = await cosGetJson(aliasKey);
+      if (!existing || typeof existing !== 'object') {
+        throw new Error(`读取云端现有域名指针失败 (${aliasKey})，已安全中止以防误覆盖`);
+      }
+      const existingProj = existing.project || null;
+      if (existingProj && effectiveProject && existingProj !== effectiveProject) {
+        throw new Error(
+          `子域名 [${cleanSub}] 已被项目 [${existingProj}] 占用，不能被项目 [${effectiveProject}] 覆盖`
+        );
+      }
+      if (existing.deploymentId && existing.deploymentId !== deploymentId) {
+        previousDeploymentId = existing.deploymentId;
+      } else if (existing.previousDeploymentId && existing.previousDeploymentId !== deploymentId) {
+        previousDeploymentId = existing.previousDeploymentId;
+      }
+      preservedStateFields = {
+        ...preservedStateFields,
+        ...pickAvailabilityFields(existing, { includeIndividual: true }),
+      };
     }
-    const existingProj = existing.project || null;
-    if (existingProj && effectiveProject && existingProj !== effectiveProject) {
-      throw new Error(
-        `子域名 [${cleanSub}] 已被项目 [${existingProj}] 占用，不能被项目 [${effectiveProject}] 覆盖`
-      );
-    }
-    if (existing.deploymentId && existing.deploymentId !== deploymentId) {
-      previousDeploymentId = existing.deploymentId;
-    } else if (existing.previousDeploymentId && existing.previousDeploymentId !== deploymentId) {
-      previousDeploymentId = existing.previousDeploymentId;
-    }
-  }
 
-  const aliasData = {
-    subdomain: cleanSub,
-    project: effectiveProject,
-    deploymentId,
-    ...(previousDeploymentId ? { previousDeploymentId } : {}),
-    updatedAt: new Date().toISOString(),
-  };
+    const nextAlias = {
+      subdomain: cleanSub,
+      project: effectiveProject,
+      deploymentId,
+      ...(previousDeploymentId ? { previousDeploymentId } : {}),
+      ...preservedStateFields,
+      updatedAt: new Date().toISOString(),
+    };
 
-  await cosPutObject(
-    `aliases/${cleanSub}.json`,
-    JSON.stringify(aliasData, null, 2),
-    'application/json; charset=UTF-8'
-  );
+    await cosPutObject(
+      aliasKey,
+      JSON.stringify(nextAlias, null, 2),
+      'application/json; charset=UTF-8'
+    );
+    return nextAlias;
+  });
 
   if (!silent) {
     console.log(
@@ -958,27 +1087,44 @@ export async function rollbackRemoteAlias(
   const pool = effectiveProject
     ? manifests.filter((m) => inferProjectFromRecord(m) === effectiveProject)
     : manifests;
-
-  const currentIdx = pool.findIndex((m) => m.id === currentDplId);
-  const byPrevious = currentAlias.previousDeploymentId
-    ? pool.find((m) => m.id === currentAlias.previousDeploymentId && m.id !== currentDplId)
-    : null;
-  const previousManifest =
-    byPrevious ||
-    (currentIdx >= 0 && currentIdx + 1 < pool.length
-      ? pool[currentIdx + 1]
-      : pool.find((m) => m.id !== currentDplId));
-
-  if (!previousManifest) {
-    throw new Error(
-      `当前仅有 1 个部署版本 (${currentDplId})，没有更早的历史版本可供回滚。`
-    );
-  }
+  const previousManifest = selectRollbackCandidateManifest(
+    pool,
+    currentDplId,
+    currentAlias.previousDeploymentId
+  );
 
   console.log(
     `⏪ 正在将 https://${cleanSub}.${remoteDomain} 从 ${currentDplId} 回滚至上一版本 ${previousManifest.id} (${previousManifest.createdAt})...`
   );
   return setRemoteAlias(cleanSub, previousManifest.id, { project: effectiveProject });
+}
+
+function formatManifestAvailabilityBadge(m) {
+  if (!m) return '';
+  const badges = [];
+  if (m.disabled === true) {
+    badges.push(`🚫 版本已禁用${m.disabledReason ? `: ${m.disabledReason}` : ''}`);
+  }
+  if (m.projectDisabled === true) {
+    badges.push(`⏸️ 项目已下线${m.projectDisabledReason ? `: ${m.projectDisabledReason}` : ''}`);
+  }
+  return badges.length > 0 ? ` | [${badges.join(' / ')}]` : '';
+}
+
+function formatAliasAvailabilityBadge(a, manifestById) {
+  if (!a) return '';
+  const targetManifest = manifestById ? manifestById.get(a.deploymentId) : null;
+  if (a.projectDisabled === true || targetManifest?.projectDisabled === true) {
+    const reason = a.projectDisabledReason || targetManifest?.projectDisabledReason || '';
+    return `  [⏸️ 项目已下线${reason ? `: ${reason}` : ''}]`;
+  }
+  if (a.disabled === true) {
+    return `  [⏸️ 子域名已下线${a.disabledReason ? `: ${a.disabledReason}` : ''}]`;
+  }
+  if (targetManifest?.disabled === true) {
+    return `  [🚫 指向版本已禁用${targetManifest.disabledReason ? `: ${targetManifest.disabledReason}` : ''}]`;
+  }
+  return '';
 }
 
 export function printFormattedState({
@@ -991,6 +1137,7 @@ export function printFormattedState({
   projectFilter,
   showAll,
 }) {
+  const manifestById = new Map(allManifests.filter((m) => m && m.id).map((m) => [m.id, m]));
   const immutableSubSet = new Set(
     allManifests.flatMap((m) => [m.immutableSubdomain, m.id?.replace(/^dpl_/, 'dpl-')]).filter(Boolean)
   );
@@ -1014,9 +1161,12 @@ export function printFormattedState({
         a.subdomain.startsWith(`${projectFilter}-`) ||
         projDplIds.has(a.deploymentId)
     );
+    const isProjectPaused =
+      projAliases.some((a) => a.projectDisabled === true) ||
+      projManifests.some((m) => m.projectDisabled === true);
 
     console.log(
-      `=== 📦 当前项目命名空间: [${projectFilter}] (${modeLabel}全局 CAS 唯一块: ${blobsCount} 个) ===`
+      `=== 📦 当前项目命名空间: [${projectFilter}]${isProjectPaused ? ' [⏸️ 已下线暂停]' : ''} (${modeLabel}全局 CAS 唯一块: ${blobsCount} 个) ===`
     );
     console.log(`\n=== 🚀 [${projectFilter}] 历史构建部署列表 (${projManifests.length} 个) ===`);
     if (projManifests.length === 0) {
@@ -1030,8 +1180,9 @@ export function printFormattedState({
             : '';
         const fnSummary =
           fnRoutes.length > 0 ? ` | 云函数:${fnRoutes.length} (${fnRoutes.join(', ')})` : '';
+        const availBadge = formatManifestAvailabilityBadge(m);
         console.log(
-          `  - ${m.id} (${m.immutableSubdomain}) | ${m.createdAt} | 文件:${m.stats.totalFiles}${scfSummary}${fnSummary} (新增:${m.stats.uploadedBlobs}, 复用:${m.stats.reusedBlobs})`
+          `  - ${m.id} (${m.immutableSubdomain}) | ${m.createdAt} | 文件:${m.stats.totalFiles}${scfSummary}${fnSummary}${availBadge} (新增:${m.stats.uploadedBlobs}, 复用:${m.stats.reusedBlobs})`
         );
       }
     }
@@ -1041,7 +1192,8 @@ export function printFormattedState({
       console.log(`  (当前项目 [${projectFilter}] 尚无子域名映射)`);
     } else {
       for (const a of projAliases) {
-        console.log(`  - ${protocol}://${a.subdomain}.${domainSuffix}  -->  ${a.deploymentId}`);
+        const availBadge = formatAliasAvailabilityBadge(a, manifestById);
+        console.log(`  - ${protocol}://${a.subdomain}.${domainSuffix}  -->  ${a.deploymentId}${availBadge}`);
       }
     }
     console.log(
@@ -1079,8 +1231,11 @@ export function printFormattedState({
 
   for (const proj of sortedProjectNames) {
     const group = projects.get(proj);
+    const isProjectPaused =
+      group.aliases.some((a) => a.projectDisabled === true) ||
+      group.manifests.some((m) => m.projectDisabled === true);
     const title = proj === 'default' ? '未分类 / 全局部署 (default)' : `项目命名空间: [${proj}]`;
-    console.log(`\n📦 ${title}`);
+    console.log(`\n📦 ${title}${isProjectPaused ? ' [⏸️ 已下线暂停]' : ''}`);
     console.log(`  🚀 历史构建版本 (${group.manifests.length} 个):`);
     for (const m of group.manifests) {
       const fnRoutes = m.functions ? Object.keys(m.functions) : [];
@@ -1090,13 +1245,15 @@ export function printFormattedState({
           : '';
       const fnSummary =
         fnRoutes.length > 0 ? ` | 云函数:${fnRoutes.length} (${fnRoutes.join(', ')})` : '';
+      const availBadge = formatManifestAvailabilityBadge(m);
       console.log(
-        `     - ${m.id} (${m.immutableSubdomain}) | ${m.createdAt} | 文件:${m.stats.totalFiles}${scfSummary}${fnSummary} (新增:${m.stats.uploadedBlobs}, 复用:${m.stats.reusedBlobs})`
+        `     - ${m.id} (${m.immutableSubdomain}) | ${m.createdAt} | 文件:${m.stats.totalFiles}${scfSummary}${fnSummary}${availBadge} (新增:${m.stats.uploadedBlobs}, 复用:${m.stats.reusedBlobs})`
       );
     }
     console.log(`  🌐 绑定域名列表 (${group.aliases.length} 个):`);
     for (const a of group.aliases) {
-      console.log(`     - ${protocol}://${a.subdomain}.${domainSuffix}  -->  ${a.deploymentId}`);
+      const availBadge = formatAliasAvailabilityBadge(a, manifestById);
+      console.log(`     - ${protocol}://${a.subdomain}.${domainSuffix}  -->  ${a.deploymentId}${availBadge}`);
     }
   }
 }

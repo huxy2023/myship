@@ -90,3 +90,7 @@ flowchart LR
 
 ### 6. 🚀 零摩擦全栈工程脚手架生成 (`myship init --template` · ✅ 已实现)
 - **开箱即用的轻量标准模板 (`packages/cli/template-generator.mjs`)**：支持在空目录执行 `myship init --template static | edge | fullstack`（或交互式 `myship create [目录]`），一键生成最小可运行的静态页、边缘函数 (`api/hello.js`) 或 SCF 全栈后端 (`server/index.mjs` + `.myship/project.json`) 骨架，默认非破坏性保留已有文件，实现从空目录到 `myship dev` / `myship` 上线的 10 秒闭环。
+
+### 7. ⏸️ 三粒度可逆上下线与漏洞版本秒级封禁 (`myship offline / online` · ✅ 已实现)
+- **正交双层状态机 (`disabled` + `projectDisabled`)**：支持按「整项目」、「单子域名 (`--alias`)」或「单构建版本 (`dpl_xxx`)」三个粒度一键暂停访问与无损恢复，切流与新发版本自动继承项目离线状态，`myship rollback` 自动跳过已禁用版本。
+- **全链路边缘 503 拦截与可视化管控**：在全局静态网关、项目 API 网关、本地网关及 `myship console` 可视化管控台实现统一的 503 维护页/JSON 短路响应与一键开关。

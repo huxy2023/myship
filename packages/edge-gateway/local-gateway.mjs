@@ -43,6 +43,51 @@ export function createLocalStorageAdapter(storageDir = DEFAULT_STORAGE_DIR) {
   };
 }
 
+function escapeHtml(str) {
+  return String(str || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function buildLocalUnavailableResponse(request, info) {
+  const rawPathname = decodeURIComponent(new URL(request.url).pathname);
+  const method = (request.method || 'GET').toUpperCase();
+  const prefix = info.backendPrefix || '/api';
+  const isBackendPath =
+    prefix === '/' ||
+    rawPathname === prefix ||
+    rawPathname.startsWith(prefix.endsWith('/') ? prefix : `${prefix}/`) ||
+    rawPathname.startsWith('/api/');
+  const accept = (request.headers && request.headers.get && request.headers.get('accept')) || '';
+  const commonHeaders = {
+    'access-control-allow-origin': '*',
+    'access-control-allow-methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
+    'access-control-allow-headers': 'Content-Type, Authorization, X-Requested-With',
+    'cache-control': 'no-store, no-cache, must-revalidate',
+    'retry-after': '120',
+    'x-myship-engine': 'EdgeOne-Local-Gateway/2.2-SCF-Backend',
+    'x-myship-status': 'offline',
+    'x-myship-offline-scope': info.scope || 'project',
+    'x-myship-project': info.project || 'default',
+    'x-myship-subdomain': info.subdomain || '',
+    'x-myship-deployment-id': info.deploymentId || '',
+  };
+  if (method === 'OPTIONS') return new Response(null, { status: 204, headers: commonHeaders });
+  const reasonText = info.reason || '站点维护中 / 管理员已暂停访问';
+  if (isBackendPath || accept.includes('application/json')) {
+    return new Response(
+      JSON.stringify({
+        ok: false, status: 503, error: 'SERVICE_UNAVAILABLE', message: reasonText,
+        scope: info.scope || 'project', reason: reasonText, project: info.project || 'default',
+        subdomain: info.subdomain || '', deploymentId: info.deploymentId || '',
+      }),
+      { status: 503, headers: { ...commonHeaders, 'content-type': 'application/json; charset=UTF-8' } }
+    );
+  }
+  return new Response(
+    `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>503 站点已下线维护 - MyShip</title></head><body><h1>503 · ${escapeHtml(reasonText)}</h1><p>Project: ${escapeHtml(info.project || 'default')} (${escapeHtml(info.subdomain || '')})</p></body></html>`,
+    { status: 503, headers: { ...commonHeaders, 'content-type': 'text/html; charset=UTF-8' } }
+  );
+}
+
 export async function handleEdgeRequest(request, adapter = createLocalStorageAdapter()) {
   const url = new URL(request.url);
   const hostHeader =
@@ -66,12 +111,39 @@ export async function handleEdgeRequest(request, adapter = createLocalStorageAda
     );
   }
 
+  if (aliasRecord && (aliasRecord.disabled === true || aliasRecord.projectDisabled === true)) {
+    const isAliasDisabled = aliasRecord.disabled === true;
+    return buildLocalUnavailableResponse(request, {
+      subdomain,
+      deploymentId,
+      project: aliasRecord.project || 'default',
+      scope: isAliasDisabled ? 'alias' : 'project',
+      reason:
+        (isAliasDisabled ? aliasRecord.disabledReason : aliasRecord.projectDisabledReason) ||
+        '站点维护中 / 管理员已暂停访问',
+    });
+  }
+
   const manifest = await adapter.getManifest(deploymentId);
   if (!manifest) {
     return new Response(
       `[MyShip Edge Gateway] 500 Manifest Missing: 找不到版本清单 ${deploymentId}`,
       { status: 500, headers: { 'content-type': 'text/plain; charset=UTF-8' } }
     );
+  }
+
+  if (manifest.disabled === true || manifest.projectDisabled === true) {
+    const isDplDisabled = manifest.disabled === true;
+    return buildLocalUnavailableResponse(request, {
+      subdomain,
+      deploymentId,
+      project: manifest.project || aliasRecord?.project || 'default',
+      scope: isDplDisabled ? 'deployment' : 'project',
+      reason:
+        (isDplDisabled ? manifest.disabledReason : manifest.projectDisabledReason) ||
+        (isDplDisabled ? '当前部署版本已被管理员禁用' : '站点维护中 / 管理员已暂停访问'),
+      backendPrefix: manifest.backend?.prefix || '/api',
+    });
   }
 
   // 1. 优先匹配项目级全栈 SCF 后端 (manifest.backend) 或约定式 Serverless 路由 (manifest.functions)

@@ -4,6 +4,41 @@ All notable changes to **MyShip (`@myship/cli`)** are documented in this file.
 
 ---
 
+## [v0.4.4] — 可逆上下线与漏洞版本秒级封禁 (`myship offline` / `myship online`)
+
+### ✨ 核心亮点 (Highlights)
+- **⏸️ 三粒度可逆上下线与版本封禁 (`myship offline` / `myship online`，支持 `pause` / `resume` / `disable` / `enable` 别名)**：
+  - **整项目一键维护下线 (`myship offline [project] [--reason "..."]`)**：在不销毁任何 COS 静态块、数据库或环境变量的前提下，一键暂停项目所有子域名与构建快照访问；执行 `myship online [project]` 即刻原样恢复（保留此前被单独封禁的漏洞版本，加 `--all` 可全量解封）。
+  - **单子域名独立停用 (`myship offline --alias <subdomain>`)**：支持暂停某个预览或测试子域名，不影响生产主域名。
+  - **单构建版本精准封禁 (`myship offline <dpl_id>`)**：封印存在 Bug 或安全隐患的历史快照（包括 `app-<hash>.ship.<domain>` 不可变预览直链），且 `myship rollback` 自动跳过已禁用版本回退至最近的健康版本。
+- **🛡️ 边缘网关与全栈后端零穿透拦截 (`503 Service Unavailable`)**：`myship-cas-router`、`myship-api-<project>` 与本地网关统一在边缘层拦截静态页面、`api/*.js` 及 SCF 全栈后端请求，返回带 `X-MyShip-Status: offline`、`X-MyShip-Offline-Scope` 与 `Retry-After: 120` 的自适应 HTML 维护页或 JSON 响应，且零额外 COS 请求开销。
+- **🖥️ `myship console` 可视化上下线管控**：在本地 Web 管控台支持一键切换「整项目下线维护 / 恢复上线」、「子域名暂停 / 启用」及「构建版本禁用 / 启用」，并实时展示离线状态徽标与维护原因。
+
+### 🛠️ 关键命令速览
+```bash
+# 安装或升级至 v0.4.4
+npm install -g @myship/cli@0.4.4
+
+# 1. 整项目一键下线维护与恢复上线
+myship offline --reason "系统升级维护中，预计 10 分钟恢复"
+myship online
+
+# 2. 单独暂停/恢复某个子域名
+myship offline --alias staging --reason "测试环境暂停开放"
+myship online --alias staging
+
+# 3. 精准封禁/解封某个历史构建版本 (dpl_xxx)
+myship offline dpl_a09cea14 --reason "修复配置泄漏"
+myship online dpl_a09cea14
+```
+
+### 📦 发行产物与校验
+- **NPM 官方包 (含 SLSA Provenance 签名)**：[`@myship/cli@0.4.4`](https://www.npmjs.com/package/@myship/cli/v/0.4.4)
+- **在线门户与文档中心**：[https://myship.ship.onehub.top](https://myship.ship.onehub.top)
+- **完整代码变更对比**：[`v0.4.3...v0.4.4`](https://github.com/huxy2023/myship/compare/v0.4.3...v0.4.4)
+
+---
+
 ## [v0.4.0] — 零摩擦工程脚手架 (`init --template`)、第二阶段模块化治理与 Skipper 品牌焕新
 
 ### ✨ 核心亮点 (Highlights)

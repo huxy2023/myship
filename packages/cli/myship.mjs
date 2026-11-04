@@ -53,6 +53,7 @@ import {
   gcState,
   gcRemoteState,
   removeResources,
+  setAvailabilityState,
 } from './lifecycle.mjs';
 import { startDevServer } from './dev-server.mjs';
 import { setupCiWorkflow } from './ci-generator.mjs';
@@ -285,6 +286,9 @@ function printHelp() {
   myship ls [--all | -A]                       默认仅列出【当前项目】的历史构建与域名；加 --all 按项目分组列出全局所有记录
   myship rollback [环境后缀] [目标dpl_id]      一键秒级回滚（前端静态快照与 SCF 后端版本同步回滚，保留持久化业务数据）
   myship alias <环境后缀> <dpl_id>             0 秒将指定子域名切换到目标前后端版本
+  myship offline [dpl_id] [--alias <sub>] [--reason "维护中"]
+                                               一键下线暂停当前项目、指定子域名或禁用存在漏洞的构建版本 (保留云资源与数据，边缘层返回 503)
+  myship online [dpl_id] [--alias <sub>]       一键恢复上线当前项目、指定子域名或重新启用构建版本 (全球边缘 2.5s 内即刻恢复)
   myship env <set|ls|rm|import|pull>           管理当前项目后端环境变量 (COS 私有存储 + 云函数注入)
   myship rm <dpl_id...> [--force]              手动删除指定历史版本快照并自动回收独占块 (加 --alias 解绑域名，加 --project 彻底销毁整个项目)
   myship gc [--keep <N|all>] [--older-than 7d] 清理过期历史快照 (支持按保留版本数或时间窗口如 30d/7d/24h)、回收孤儿块并释放配额
@@ -336,6 +340,7 @@ if (isMainModule) {
   let portArg = null;
   let limitArg = null;
   let rollbackTargetArg = null;
+  let reasonArg = null;
   const positional = [];
 
   for (let i = 0; i < rawArgs.length; i++) {
@@ -346,6 +351,10 @@ if (isMainModule) {
       if (rawArgs[i + 1]) aliasTargets.push(rawArgs[++i]);
     } else if (arg === '--project' || arg === '-p') {
       if (rawArgs[i + 1]) explicitProject = rawArgs[++i];
+    } else if (arg === '--reason' || arg === '-m') {
+      if (rawArgs[i + 1]) reasonArg = rawArgs[++i];
+    } else if (arg.startsWith('--reason=')) {
+      reasonArg = arg.slice('--reason='.length);
     } else if (arg === '--dir') {
       if (rawArgs[i + 1]) explicitDir = rawArgs[++i];
     } else if (arg === '--entry') {
@@ -459,7 +468,12 @@ if (isMainModule) {
       }
       return;
     }
-    if (first === 'backend' || first === 'scf' || first === 'enable' || first === 'disable') {
+    if (
+      first === 'backend' ||
+      first === 'scf' ||
+      ((first === 'enable' || first === 'disable') &&
+        (isScfFlag || positional[1] === 'backend' || positional[1] === 'scf'))
+    ) {
       let sub = positional[1] || 'status';
       if (first === 'enable') sub = 'enable';
       if (first === 'disable') sub = 'disable';
@@ -470,6 +484,48 @@ if (isMainModule) {
         region: explicitRegion,
         entry: explicitEntry,
         role: explicitRole,
+        isLocal,
+      });
+      return;
+    }
+    if (
+      first === 'offline' ||
+      first === 'online' ||
+      first === 'pause' ||
+      first === 'resume' ||
+      first === 'disable' ||
+      first === 'enable'
+    ) {
+      const action =
+        first === 'online' || first === 'resume' || first === 'enable' ? 'online' : 'offline';
+      const restTargets = positional.slice(1);
+      const dplTargets = restTargets.filter((t) => String(t).startsWith('dpl_'));
+      const nonDplTargets = restTargets.filter((t) => !String(t).startsWith('dpl_'));
+      const combinedAliases = [...aliasTargets, ...domains];
+      let targetExplicitProject = explicitProject;
+      if (combinedAliases.length > 0) {
+        combinedAliases.push(...nonDplTargets);
+      } else if (dplTargets.length > 0 && nonDplTargets.length > 0) {
+        throw new Error(
+          `不能同时混合指定版本 ID (${dplTargets[0]}) 与位置参数 (${nonDplTargets[0]})；如需限定项目请使用 --project`
+        );
+      } else if (nonDplTargets.length > 1 || (targetExplicitProject && nonDplTargets.length > 0)) {
+        throw new Error(
+          `一次仅支持对单个项目执行全量上下线；如需针对多个子域名操作，请使用 --alias <sub1> <sub2>`
+        );
+      } else if (dplTargets.length === 0 && nonDplTargets.length === 1 && !targetExplicitProject) {
+        targetExplicitProject = nonDplTargets[0];
+      }
+      const ctx = detectProjectContext(process.cwd(), targetExplicitProject);
+      await setAvailabilityState({
+        action,
+        project: ctx.project,
+        explicitProject: targetExplicitProject,
+        aliases: combinedAliases,
+        deploymentIds: dplTargets,
+        reason: reasonArg,
+        all: isAll,
+        raw: isRawDomain,
         isLocal,
       });
       return;

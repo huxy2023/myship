@@ -45,6 +45,7 @@ import {
   gcState,
   gcRemoteState,
   removeResources,
+  setAvailabilityState,
 } from './lifecycle.mjs';
 
 export function computeManifestDiff(baseManifest, targetManifest) {
@@ -235,11 +236,24 @@ async function loadConsoleStateData({
     ensureGroup(p).aliases.push(a);
   }
 
-  const projects = [...projectMap.values()].sort((a, b) => {
-    if (a.name === 'default') return 1;
-    if (b.name === 'default') return -1;
-    return a.name.localeCompare(b.name);
-  });
+  const projects = [...projectMap.values()]
+    .map((group) => {
+      const pausedRecord =
+        group.aliases.find((a) => a.projectDisabled === true) ||
+        group.manifests.find((m) => m.projectDisabled === true) ||
+        null;
+      return {
+        ...group,
+        projectDisabled: Boolean(pausedRecord),
+        projectDisabledReason: pausedRecord?.projectDisabledReason || null,
+        projectDisabledAt: pausedRecord?.projectDisabledAt || null,
+      };
+    })
+    .sort((a, b) => {
+      if (a.name === 'default') return 1;
+      if (b.name === 'default') return -1;
+      return a.name.localeCompare(b.name);
+    });
 
   return {
     isLocal,
@@ -429,6 +443,39 @@ export function createConsoleRequestHandler({
           ? rollbackAlias(finalSub, targetDeploymentId, { storageDir, project })
           : await rollbackRemoteAlias(finalSub, targetDeploymentId, { project });
         return sendJson(res, 200, { ok: true, alias });
+      }
+
+      if (pathname === '/api/console/availability' && method === 'POST') {
+        const action =
+          String(body.action || '').toLowerCase() === 'online' ? 'online' : 'offline';
+        const project = normalizeDomainToken(body.project || '') || null;
+        const aliases = Array.isArray(body.aliases)
+          ? body.aliases
+          : body.subdomain
+          ? [String(body.subdomain).trim()]
+          : [];
+        const deploymentIds = Array.isArray(body.deploymentIds)
+          ? body.deploymentIds
+          : body.deploymentId
+          ? [String(body.deploymentId).trim()]
+          : [];
+        const reason = body.reason ? String(body.reason).trim() : null;
+        const all = Boolean(body.all);
+        const raw = Boolean(body.raw);
+
+        const result = await setAvailabilityState({
+          action,
+          project: project || detectProjectContext(cwd).project,
+          explicitProject: project,
+          aliases,
+          deploymentIds,
+          reason,
+          all,
+          raw,
+          isLocal,
+          storageDir,
+        });
+        return sendJson(res, 200, { ok: true, result });
       }
 
       if (pathname === '/api/console/env' && method === 'GET') {

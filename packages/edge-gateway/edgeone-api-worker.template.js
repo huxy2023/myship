@@ -40,9 +40,55 @@ const PRECOMPILED_FN_REGISTRY = {
 };
 
 const FN_INSTANCE_CACHE = new Map(); // "${project}:${sha256}" -> modExports
-const ALIAS_CACHE = new Map();       // subdomain -> { deploymentId, ts }
-const MANIFEST_CACHE = new Map();    // deploymentId -> manifestObject
+const ALIAS_CACHE = new Map();       // subdomain -> { record, ts }
+const MANIFEST_CACHE = new Map();    // deploymentId -> { record, ts }
 const MAX_EDGEONE_BODY_BYTES = 1024 * 1024; // EdgeOne 边缘函数客户端请求 Body 硬上限 1 MB
+
+function escapeHtml(str) {
+  return String(str || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function buildUnavailableResponse(request, info) {
+  const rawPathname = decodeURIComponent(new URL(request.url).pathname);
+  const method = (request.method || 'GET').toUpperCase();
+  const prefix = info.backendPrefix || '/api';
+  const isBackendPath =
+    prefix === '/' ||
+    rawPathname === prefix ||
+    rawPathname.startsWith(prefix.endsWith('/') ? prefix : `${prefix}/`) ||
+    rawPathname.startsWith('/api/');
+  const accept = (request.headers && request.headers.get && request.headers.get('accept')) || '';
+  const commonHeaders = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With',
+    'Cache-Control': 'no-store, no-cache, must-revalidate',
+    'Retry-After': '120',
+    'X-MyShip-Engine': 'EdgeOne-API-Worker/2.1-SchemeA',
+    'X-MyShip-Function-Worker': `myship-api-${info.project || PROJECT_NAME}`,
+    'X-MyShip-Status': 'offline',
+    'X-MyShip-Offline-Scope': info.scope || 'project',
+    'X-MyShip-Project': info.project || PROJECT_NAME || 'default',
+    'X-MyShip-Subdomain': info.subdomain || '',
+    'X-MyShip-Deployment-Id': info.deploymentId || '',
+  };
+  if (method === 'OPTIONS') return new Response(null, { status: 204, headers: commonHeaders });
+  const reasonText = info.reason || '站点维护中 / 管理员已暂停访问';
+  if (isBackendPath || accept.includes('application/json')) {
+    return new Response(
+      JSON.stringify({
+        ok: false, status: 503, error: 'SERVICE_UNAVAILABLE', message: reasonText,
+        scope: info.scope || 'project', reason: reasonText, project: info.project || PROJECT_NAME || 'default',
+        subdomain: info.subdomain || '', deploymentId: info.deploymentId || '',
+      }),
+      { status: 503, headers: Object.assign({}, commonHeaders, { 'Content-Type': 'application/json; charset=UTF-8' }) }
+    );
+  }
+  return new Response(
+    `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>503 站点已下线维护 - MyShip</title></head><body><h1>503 · ${escapeHtml(reasonText)}</h1><p>Project: ${escapeHtml(info.project || PROJECT_NAME || 'default')} (${escapeHtml(info.subdomain || '')})</p></body></html>`,
+    { status: 503, headers: Object.assign({}, commonHeaders, { 'Content-Type': 'text/html; charset=UTF-8' }) }
+  );
+}
 
 function extractSubdomain(hostHeader) {
   if (!hostHeader) return PROJECT_NAME || 'prod';
@@ -55,7 +101,7 @@ function extractSubdomain(hostHeader) {
 }
 
 async function fetchCosJson(key, cacheTtl = 0) {
-  const url = `${COS_ORIGIN}/${key}${cacheTtl === 0 ? `?t=${Date.now()}` : ''}`;
+  const url = `${COS_ORIGIN}/${key}${cacheTtl === 0 ? `?_t=${Date.now()}` : ''}`;
   const res = await fetch(url, {
     headers: {
       'Cache-Control': cacheTtl === 0 ? 'no-cache, no-store' : `max-age=${cacheTtl}`,
@@ -69,16 +115,16 @@ async function fetchCosJson(key, cacheTtl = 0) {
   }
 }
 
-async function resolveDeploymentId(subdomain, event) {
+async function resolveAliasRecord(subdomain, event) {
   if (subdomain === '_myship_probe') {
     return null;
   }
   if (subdomain.startsWith('dpl-')) {
-    return subdomain.replace(/^dpl-/, 'dpl_');
+    return { deploymentId: subdomain.replace(/^dpl-/, 'dpl_'), isImmutableUrl: true };
   }
   const immMatch = subdomain.match(/-([0-9a-f]{8})$/);
   if (immMatch) {
-    return `dpl_${immMatch[1]}`;
+    return { deploymentId: `dpl_${immMatch[1]}`, isImmutableUrl: true };
   }
 
   const now = Date.now();
@@ -87,16 +133,17 @@ async function resolveDeploymentId(subdomain, event) {
   const refreshTask = async () => {
     const aliasData = await fetchCosJson(`aliases/${subdomain}.json`, 0);
     if (aliasData && aliasData.deploymentId) {
-      ALIAS_CACHE.set(subdomain, { deploymentId: aliasData.deploymentId, ts: Date.now() });
-      return aliasData.deploymentId;
+      ALIAS_CACHE.set(subdomain, { record: aliasData, ts: Date.now() });
+      return aliasData;
     }
+    ALIAS_CACHE.delete(subdomain);
     return null;
   };
 
   if (cached) {
     const age = now - cached.ts;
     if (age < 2500) {
-      return cached.deploymentId;
+      return cached.record;
     }
     if (age < 60000) {
       if (event && typeof event.waitUntil === 'function') {
@@ -104,26 +151,47 @@ async function resolveDeploymentId(subdomain, event) {
       } else {
         refreshTask();
       }
-      return cached.deploymentId;
+      return cached.record;
     }
   }
 
   return await refreshTask();
 }
 
-async function resolveManifest(deploymentId) {
-  if (MANIFEST_CACHE.has(deploymentId)) {
-    return MANIFEST_CACHE.get(deploymentId);
-  }
-  const manifest = await fetchCosJson(`manifests/${deploymentId}.json`, 31536000);
-  if (manifest && (manifest.files || manifest.functions || manifest.backend)) {
-    if (MANIFEST_CACHE.size >= 64) {
-      const oldestKey = MANIFEST_CACHE.keys().next().value;
-      MANIFEST_CACHE.delete(oldestKey);
+async function resolveManifest(deploymentId, event) {
+  const now = Date.now();
+  const cached = MANIFEST_CACHE.get(deploymentId);
+
+  const refreshTask = async () => {
+    const manifest = await fetchCosJson(`manifests/${deploymentId}.json`, 0);
+    if (manifest && (manifest.files || manifest.functions || manifest.backend)) {
+      if (!MANIFEST_CACHE.has(deploymentId) && MANIFEST_CACHE.size >= 64) {
+        const oldestKey = MANIFEST_CACHE.keys().next().value;
+        MANIFEST_CACHE.delete(oldestKey);
+      }
+      MANIFEST_CACHE.set(deploymentId, { record: manifest, ts: Date.now() });
+      return manifest;
     }
-    MANIFEST_CACHE.set(deploymentId, manifest);
+    MANIFEST_CACHE.delete(deploymentId);
+    return null;
+  };
+
+  if (cached) {
+    const age = now - cached.ts;
+    if (age < 2500) {
+      return cached.record;
+    }
+    if (age < 60000) {
+      if (event && typeof event.waitUntil === 'function') {
+        event.waitUntil(refreshTask());
+      } else {
+        refreshTask();
+      }
+      return cached.record;
+    }
   }
-  return manifest;
+
+  return await refreshTask();
 }
 
 function extractPlainHeaders(headersInput) {
@@ -410,7 +478,8 @@ async function handleApiRequest(request, event) {
   const host = request.headers.get('host') || url.host;
   const subdomain = extractSubdomain(host);
 
-  const deploymentId = await resolveDeploymentId(subdomain, event);
+  const aliasRecord = await resolveAliasRecord(subdomain, event);
+  const deploymentId = aliasRecord && aliasRecord.deploymentId;
   if (!deploymentId) {
     return new Response(
       JSON.stringify({
@@ -428,7 +497,20 @@ async function handleApiRequest(request, event) {
     );
   }
 
-  const manifest = await resolveManifest(deploymentId);
+  if (aliasRecord.disabled || aliasRecord.projectDisabled) {
+    return buildUnavailableResponse(request, {
+      scope: aliasRecord.projectDisabled ? 'project' : 'alias',
+      reason:
+        aliasRecord.projectDisabledReason ||
+        aliasRecord.disabledReason ||
+        '当前子域名或项目已暂停访问',
+      project: aliasRecord.project || PROJECT_NAME || subdomain,
+      subdomain,
+      deploymentId,
+    });
+  }
+
+  const manifest = await resolveManifest(deploymentId, event);
   if (!manifest || (!manifest.functions && !manifest.backend)) {
     return new Response(
       JSON.stringify({
@@ -444,6 +526,20 @@ async function handleApiRequest(request, event) {
         },
       }
     );
+  }
+
+  if (manifest.disabled || manifest.projectDisabled) {
+    return buildUnavailableResponse(request, {
+      scope: manifest.projectDisabled ? 'project' : 'deployment',
+      reason:
+        manifest.projectDisabledReason ||
+        manifest.disabledReason ||
+        '当前构建版本已被管理员禁用',
+      project: manifest.project || aliasRecord.project || PROJECT_NAME || subdomain,
+      subdomain,
+      deploymentId,
+      backendPrefix: manifest.backend && manifest.backend.prefix,
+    });
   }
 
   const rawPathname = decodeURIComponent(url.pathname);

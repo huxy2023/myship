@@ -69,12 +69,14 @@ Before writing code, select the minimal sufficient runtime tier for the user's p
    ```
    Locally, `context.db` defaults to zero-config `node:sqlite` (`.myship/data/<project>/local.sqlite`) unless cloud DB env vars are active, and `context.files` / `context.storage` persist under `.myship/`.
 
-5. **Deploy, Inspect Logs & Instant Rollback**:
+5. **Deploy, Inspect Logs, Instant Rollback & Reversible Offline/Online**:
    ```bash
    myship                       # Deploy static + backend snapshot (dpl_<id>) and switch production alias in 0ms
    myship -d staging            # Deploy to preview subdomain https://<project>-staging.ship.<domain>
    myship logs --error          # Inspect real cloud SCF logs with inline SourceMap line numbers
-   myship rollback              # 0ms atomic rollback of both frontend and SCF backend version
+   myship rollback              # 0ms atomic rollback of both frontend and SCF backend version (skips disabled dpl_*)
+   myship offline --reason "Maintenance" # Reversibly take project (or --alias <sub> / <dpl_id>) offline with 503
+   myship online                # Instantly restore online access (preserving individual disabled versions unless --all)
    ```
 
 ---

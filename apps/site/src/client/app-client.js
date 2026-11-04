@@ -79,10 +79,14 @@ x-myship-deployment-id: dpl_a09cea14
 x-myship-scf-version: 2
 
 <span class="t-ok">{"ok":true,"deploymentId":"dpl_a09cea14","dbEngine":"turso-http","rows":3}</span>`,
-  rollback: `<span class="t-dim"># 线上发现问题？无需重新构建，0 秒把项目主域名前后端同帧回退到上一版:</span>
+  rollback: `<span class="t-dim"># 线上发现问题？0 秒把项目主域名前后端同帧回退到上一健康版本:</span>
 <span class="t-cmd">$ myship rollback</span>
 ⏪ 正在将 https://app1.ship.example.com 从 dpl_a09cea14 回滚至上一版本 dpl_6e46ed99...
-<span class="t-ok">🔗 云端域名别名已切换: https://app1.ship.example.com -> dpl_6e46ed99 (SCF v2 -> v1 同帧回退)</span>`,
+<span class="t-ok">🔗 云端域名别名已切换: https://app1.ship.example.com -> dpl_6e46ed99 (SCF v2 -> v1 同帧回退)</span>
+
+<span class="t-dim"># 需要停机维护或封禁漏洞版本？一键可逆下线 (保留数据与资源，边缘返回 503):</span>
+<span class="t-cmd">$ myship offline dpl_a09cea14 --reason "修复配置泄漏"</span>
+<span class="t-ok">⏸️  已禁用构建版本: dpl_a09cea14 (随时可执行 myship online 秒级恢复)</span>`,
 };
 
 const termScreen = document.getElementById('terminal-screen');

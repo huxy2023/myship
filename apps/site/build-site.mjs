@@ -19,6 +19,7 @@ import { MASCOT_SVG, LOGO_SVG, FAVICON_SVG } from '../../packages/cli/brand.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = resolve(__dirname, '../..');
+const ROOT_PKG = JSON.parse(readFileSync(resolve(ROOT_DIR, 'package.json'), 'utf-8'));
 const PUBLIC_DIR = resolve(__dirname, 'public');
 const SKILL_SRC_DIR = resolve(ROOT_DIR, 'skills/myship-skill');
 const DIST_DIR = resolve(__dirname, 'dist');
@@ -144,7 +145,7 @@ ${bundledCss}
         <a class="brand" href="#/portal" data-switch-view="portal" title="MyShip — 自有云海，一令启航 (Your Cloud. Your Fleet. One Command to Ship.)">
           <img class="brand-icon" src="/logo.svg" alt="" width="32" height="32" />
           <span>MyShip</span>
-          <span class="brand-badge">v0.3 · BYOC</span>
+          <span class="brand-badge">v${ROOT_PKG.version} · BYOC</span>
         </a>
         <nav class="nav-tabs">
           <button type="button" class="nav-tab active" data-switch-view="portal">🏠 产品门户</button>
@@ -450,7 +451,8 @@ ${parsedDocs.map((d) => `- [${d.title}](https://myship.ship.onehub.top${d.rawPat
 - 查询云端全栈运行日志与真实源码报错行号: \`myship logs [--error]\`
 - 管理项目私有环境变量 (COS 私有存储，边缘 api/*.js 自动热更新，SCF 全栈后端需重新执行 myship 发布新版本生效): \`myship env <set|ls|rm|import|pull>\`
 - 查看当前项目版本与域名: \`myship ls\` (全局按项目分组: \`myship ls --all\`)
-- 0 秒一键回滚主域名 (前后端同帧回退): \`myship rollback\`
+- 0 秒一键回滚主域名 (前后端同帧回退，自动跳过已禁用版本): \`myship rollback\`
+- 可逆上下线维护与漏洞版本封禁 (保留云资源与数据，边缘秒级拦截 503): \`myship offline [dpl_id | --alias <sub>] [--reason "维护中"]\` / \`myship online [dpl_id | --alias <sub>]\`
 - CAS 垃圾回收与精确资源销毁: \`myship gc [--keep N | --older-than 7d]\` / \`myship rm <dpl_id | --alias | --project>\`
 - 启动本机 127.0.0.1:4200 可视化 Web 管控台: \`myship console\`
 `;

@@ -26,6 +26,8 @@ This reference provides non-interactive CLI commands, CI/CD workflow recipes, an
 | **List current project deployments & aliases** | `myship ls` (or `myship ls --all` for all projects) |
 | **0ms atomic rollback (frontend + SCF backend)** | `myship rollback [subdomain] [--to dpl_xxx]` |
 | **0ms alias traffic switch** | `myship alias <subdomain> <dpl_id>` |
+| **Reversible offline / pause (project, alias, or deployment)** | `myship offline [dpl_id] [--alias <sub>] [--reason "..."]` |
+| **Restore online / resume (project, alias, or deployment)** | `myship online [dpl_id] [--alias <sub>] [--all]` |
 | **Dry-run garbage collection** | `myship gc --keep 10 --dry-run` |
 | **Generate GitHub Actions CI/CD + PR preview workflow** | `myship init --ci [--sync-secrets]` |
 | **Install MyShip AI Skill (`myship-skill`)** | `myship skill install [--global]` |

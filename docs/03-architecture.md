@@ -84,6 +84,9 @@ flowchart LR
   - 在边缘 V8 模式下，`manifest.functions` 锁定了函数代码的 `sha256`；
   - 在 SCF 全栈 Node.js 模式下，每次部署都会调用腾讯云 SCF `PublishVersion` 冻结一个不可变版本（如 `Version 3`）并绑定专属触发器 URL 写入 `manifest.backend.upstreamUrl`。
   - 当执行 `myship rollback` 改写 `aliases/app1.json` 指针时，前端 HTML 与后端接口在同一毫秒内切换回旧版 `manifest` 所指向的静态块与后端版本，彻底杜绝前后端版本错配。
+- **零额外请求的可逆上下线与版本封禁（`disabled` vs `projectDisabled` 双层状态机）**：
+  - `aliases/<subdomain>.json` 与 `manifests/dpl_<id>.json` 原地承载两套正交状态字段：单点封禁（`disabled` / `disabledReason`）与整项目维护（`projectDisabled` / `projectDisabledReason`）。
+  - 边缘网关（`myship-cas-router` 与 `myship-api-<project>`）在解析既有 `alias` 与 `manifest` 时直接完成状态判定（**0 额外 COS 请求开销**），一旦命中封禁状态即刻在边缘层短路返回 `503 Service Unavailable`（带 `X-MyShip-Status: offline`、`X-MyShip-Offline-Scope: project|alias|deployment` 与 `Retry-After: 120`），确保静态页、不可变预览直链（`<project>-<hash>`）与全栈 API 零穿透，同时在 `myship online <project>` 恢复时完好保留此前被单独封禁的缺陷版本。
 
 ---
 

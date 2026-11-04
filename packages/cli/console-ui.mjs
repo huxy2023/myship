@@ -85,6 +85,7 @@ export function renderConsoleHtml({
           <div class="project-hero-title">
             <span>📦 项目工作区: <code id="statProject" style="font-size:16px;padding:3px 9px;">${safeProj}</code></span>
             <span class="badge" id="heroRuntimeBadge">检测中...</span>
+            <span class="badge success" id="heroAvailabilityBadge">🟢 在线运行</span>
           </div>
           <div class="project-hero-meta">
             <span>生产主域: <strong id="heroPrimaryUrl">-</strong></span>
@@ -93,6 +94,7 @@ export function renderConsoleHtml({
           </div>
         </div>
         <div class="row-actions">
+          <button id="heroToggleAvailabilityBtn" onclick="toggleProjectAvailability()">⏸️ 暂停全站访问</button>
           <button onclick="switchWorkspaceTab('backend')">📋 查看云端日志</button>
           <button onclick="switchWorkspaceTab('resources')">🗄️ 浏览数据库与存储</button>
         </div>

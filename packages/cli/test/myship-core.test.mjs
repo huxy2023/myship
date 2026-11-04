@@ -41,7 +41,12 @@ import {
   scaffoldProjectTemplate,
   createLocalFileStorage,
   createCloudStorage,
+  setAvailabilityState,
+  generateEdgeFunctionCode,
+  generateProjectApiWorkerCode,
+  createConsoleRequestHandler,
 } from '../myship.mjs';
+import { withKeyWriteLock } from '../project-context.mjs';
 import { renderConsoleHtml } from '../console-ui.mjs';
 import { startScfRuntimeServer } from '../scf-bootstrap-runtime.mjs';
 import { handleEdgeRequest } from '../../edge-gateway/local-gateway.mjs';
@@ -1388,6 +1393,503 @@ test('SCF api-dir bundler supports api/upstreams.json and export const upstreamU
     assert.equal(receivedRequests[1].route, '/api/js-proxy');
   } finally {
     await new Promise((r) => upstreamServer.close(r));
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('Reversible online/offline & version disable across project, alias, deployment, rollback, Console API, and Edge SWR', async () => {
+  const tmpRoot = mkdtempSync(join(tmpdir(), 'myship-availability-test-'));
+  const storageDir = join(tmpRoot, '.cas-storage');
+  const distDir = join(tmpRoot, 'dist');
+  mkdirSync(distDir, { recursive: true });
+
+  let scfHits = 0;
+  const mockScfServer = http.createServer((req, res) => {
+    scfHits++;
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ ok: true, url: req.url }));
+  });
+  await new Promise((r) => mockScfServer.listen(0, '127.0.0.1', r));
+  const scfPort = mockScfServer.address().port;
+
+  function makeStorageReader() {
+    return {
+      getAlias: (sub) => {
+        const p = join(storageDir, 'aliases', `${sub}.json`);
+        return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : null;
+      },
+      getManifest: (id) => {
+        const p = join(storageDir, 'manifests', `${id}.json`);
+        return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : null;
+      },
+      getBlob: (sha) => {
+        const p = join(storageDir, 'blobs', sha);
+        return existsSync(p) ? readFileSync(p) : null;
+      },
+    };
+  }
+
+  try {
+    // Deploy v1, v2, v3 for project 'avail-app'
+    writeFileSync(join(distDir, 'index.html'), '<h1>v1</h1>', 'utf8');
+    const v1 = deployDirectory(distDir, {
+      storageDir,
+      project: 'avail-app',
+      aliases: ['avail-app', 'avail-app-staging'],
+    });
+    await new Promise((r) => setTimeout(r, 15));
+
+    writeFileSync(join(distDir, 'index.html'), '<h1>v2-vulnerable</h1>', 'utf8');
+    const v2 = deployDirectory(distDir, {
+      storageDir,
+      project: 'avail-app',
+      aliases: ['avail-app'],
+    });
+    await new Promise((r) => setTimeout(r, 15));
+
+    writeFileSync(join(distDir, 'index.html'), '<h1>v3-safe</h1>', 'utf8');
+    const v3 = deployDirectory(distDir, {
+      storageDir,
+      project: 'avail-app',
+      aliases: ['avail-app'],
+    });
+
+    // Attach SCF backend info to v3 manifest to test /api/* edge short-circuiting
+    const v3ManifestPath = join(storageDir, 'manifests', `${v3.deploymentId}.json`);
+    const v3Manifest = JSON.parse(readFileSync(v3ManifestPath, 'utf8'));
+    v3Manifest.backend = {
+      provider: 'scf',
+      functionName: 'myship-avail-app',
+      scfVersion: '1',
+      upstreamUrl: `http://127.0.0.1:${scfPort}`,
+      prefix: '/api',
+      gatewayToken: 'msgt_avail_123',
+    };
+    writeFileSync(v3ManifestPath, JSON.stringify(v3Manifest, null, 2), 'utf8');
+
+    // 1) Disable vulnerable deployment v2 (`myship offline <v2>`)
+    const disableV2Res = await setAvailabilityState({
+      action: 'offline',
+      project: 'avail-app',
+      deploymentIds: [v2.deploymentId],
+      reason: 'CVE-2026-0001 修复中',
+      isLocal: true,
+      storageDir,
+    });
+    assert.equal(disableV2Res.scope, 'deployment');
+
+    // Immutable preview URL for v2 must return 503 HTML for browser
+    const v2PreviewRes = await handleEdgeRequest(
+      new Request(`http://${v2.immutableSubdomain}.ship.localhost:4100/`, {
+        headers: { Accept: 'text/html' },
+      }),
+      makeStorageReader()
+    );
+    assert.equal(v2PreviewRes.status, 503);
+    assert.equal(v2PreviewRes.headers.get('x-myship-status'), 'offline');
+    const v2Html = await v2PreviewRes.text();
+    assert(v2Html.includes('CVE-2026-0001 修复中'));
+
+    // Switching alias to disabled v2 must be rejected
+    assert.throws(
+      () => setAlias('avail-app', v2.deploymentId, { storageDir, project: 'avail-app' }),
+      /当前处于已禁用状态/
+    );
+
+    // Automatic rollback from v3 must skip disabled v2 (even though previousDeploymentId is v2!) and land on v1
+    const rolledAlias = rollbackAlias('avail-app', null, { storageDir, project: 'avail-app' });
+    assert.equal(
+      rolledAlias.deploymentId,
+      v1.deploymentId,
+      'Rollback must skip disabled v2 and fall back to v1'
+    );
+    // Switch back to v2 for rollback-with-newer-preview test:
+    // Suppose v1 is disabled, avail-app is at v3 (with previousDeploymentId = v1), and v3_preview is a newer --preview deployment
+    await setAvailabilityState({
+      action: 'offline',
+      project: 'avail-app',
+      deploymentIds: [v1.deploymentId],
+      reason: 'v1 也被禁用',
+      isLocal: true,
+      storageDir,
+    });
+    setAlias('avail-app', v3.deploymentId, { storageDir, project: 'avail-app', silent: true });
+    await new Promise((r) => setTimeout(r, 15));
+    writeFileSync(join(distDir, 'index.html'), '<h1>v3-unreleased-preview</h1>', 'utf8');
+    const vPreview = deployDirectory(distDir, {
+      storageDir,
+      project: 'avail-app',
+      aliases: [],
+    });
+    assert.throws(
+      () => rollbackAlias('avail-app', null, { storageDir, project: 'avail-app' }),
+      /历史候选版本均处于已禁用状态/,
+      `Rollback from v3 when v1 & v2 are disabled must NOT promote newer unreleased preview ${vPreview.deploymentId}`
+    );
+    await setAvailabilityState({
+      action: 'online',
+      project: 'avail-app',
+      deploymentIds: [v1.deploymentId],
+      isLocal: true,
+      storageDir,
+    });
+
+    // Regression: concurrent `offline <v1>` and `online <project>` must not clobber v1's disabled flag
+    await setAvailabilityState({
+      action: 'offline',
+      project: 'avail-app',
+      reason: '准备并发测试',
+      isLocal: true,
+      storageDir,
+    });
+    await Promise.all([
+      setAvailabilityState({
+        action: 'offline',
+        project: 'avail-app',
+        deploymentIds: [v1.deploymentId],
+        reason: '并发禁用 v1',
+        isLocal: true,
+        storageDir,
+      }),
+      setAvailabilityState({
+        action: 'online',
+        project: 'avail-app',
+        isLocal: true,
+        storageDir,
+      }),
+    ]);
+    const v1AfterConcurrent = JSON.parse(
+      readFileSync(join(storageDir, 'manifests', `${v1.deploymentId}.json`), 'utf8')
+    );
+    assert.equal(
+      v1AfterConcurrent.disabled,
+      true,
+      'Concurrent project online must not overwrite concurrent deployment disable on v1'
+    );
+    assert.equal(v1AfterConcurrent.projectDisabled, undefined);
+    await setAvailabilityState({
+      action: 'online',
+      project: 'avail-app',
+      deploymentIds: [v1.deploymentId],
+      isLocal: true,
+      storageDir,
+    });
+
+    // 2) Project-wide offline (`myship offline`) + online (`myship online`) preserves v2's individual disabled state
+    await setAvailabilityState({
+      action: 'offline',
+      project: 'avail-app',
+      reason: '夜间数据库割接维护',
+      isLocal: true,
+      storageDir,
+    });
+
+    // Both mutable prod alias and immutable v3 preview must return 503, and /api/* must NOT hit SCF
+    const apiPausedRes = await handleEdgeRequest(
+      new Request('http://avail-app.ship.localhost:4100/api/posts'),
+      makeStorageReader()
+    );
+    assert.equal(apiPausedRes.status, 503);
+    assert.equal(scfHits, 0, 'Paused project must short-circuit at edge without hitting SCF');
+    const apiPausedJson = await apiPausedRes.json();
+    assert.equal(apiPausedJson.error, 'SERVICE_UNAVAILABLE');
+    assert.equal(apiPausedJson.reason, '夜间数据库割接维护');
+
+    const v3PreviewPausedRes = await handleEdgeRequest(
+      new Request(`http://${v3.immutableSubdomain}.ship.localhost:4100/`),
+      makeStorageReader()
+    );
+    assert.equal(v3PreviewPausedRes.status, 503);
+
+    // Deploying v4 while project is offline must inherit projectDisabled: true
+    writeFileSync(join(distDir, 'index.html'), '<h1>v4-while-paused</h1>', 'utf8');
+    const v4 = deployDirectory(distDir, {
+      storageDir,
+      project: 'avail-app',
+      aliases: ['avail-app'],
+    });
+    assert.equal(v4.manifest.projectDisabled, true);
+
+    // Bring project back online (`myship online`)
+    await setAvailabilityState({
+      action: 'online',
+      project: 'avail-app',
+      isLocal: true,
+      storageDir,
+    });
+
+    const prodOnlineRes = await handleEdgeRequest(
+      new Request('http://avail-app.ship.localhost:4100/'),
+      makeStorageReader()
+    );
+    assert.equal(prodOnlineRes.status, 200);
+    assert.equal(await prodOnlineRes.text(), '<h1>v4-while-paused</h1>');
+
+    // Crucially, v2 must STILL be disabled after project-level `online`!
+    const v2StillDisabledRes = await handleEdgeRequest(
+      new Request(`http://${v2.immutableSubdomain}.ship.localhost:4100/`),
+      makeStorageReader()
+    );
+    assert.equal(
+      v2StillDisabledRes.status,
+      503,
+      'Project-level online must NOT re-enable individually disabled deployment v2'
+    );
+
+    // 3) Alias-level pause (`myship offline --alias staging`) and Console API `/api/console/availability`
+    await setAvailabilityState({
+      action: 'offline',
+      project: 'avail-app',
+      aliases: ['staging'],
+      reason: '测试环境暂停对外',
+      isLocal: true,
+      storageDir,
+    });
+    const stagingPausedRes = await handleEdgeRequest(
+      new Request('http://avail-app-staging.ship.localhost:4100/'),
+      makeStorageReader()
+    );
+    assert.equal(stagingPausedRes.status, 503);
+
+    // Switching paused alias to v3 must preserve its paused state
+    setAlias('avail-app-staging', v3.deploymentId, {
+      storageDir,
+      project: 'avail-app',
+      silent: true,
+    });
+    const stagingStillPausedRes = await handleEdgeRequest(
+      new Request('http://avail-app-staging.ship.localhost:4100/'),
+      makeStorageReader()
+    );
+    assert.equal(stagingStillPausedRes.status, 503);
+
+    // Re-enable staging alias via Console API `POST /api/console/availability`
+    const consoleHandler = createConsoleRequestHandler({
+      isLocal: true,
+      storageDir,
+      cwd: tmpRoot,
+    });
+    const consoleServer = http.createServer(consoleHandler);
+    await new Promise((r) => consoleServer.listen(0, '127.0.0.1', r));
+    const consolePort = consoleServer.address().port;
+    try {
+      const toggleRes = await fetch(`http://127.0.0.1:${consolePort}/api/console/availability`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-MyShip-Console': '1',
+        },
+        body: JSON.stringify({
+          action: 'online',
+          project: 'avail-app',
+          subdomain: 'avail-app-staging',
+          raw: true,
+        }),
+      });
+      assert.equal(toggleRes.status, 200);
+    } finally {
+      await new Promise((r) => consoleServer.close(r));
+    }
+
+    const stagingOnlineRes = await handleEdgeRequest(
+      new Request('http://avail-app-staging.ship.localhost:4100/'),
+      makeStorageReader()
+    );
+    assert.equal(stagingOnlineRes.status, 200);
+
+    // 4) Cloud EdgeOne Function (`edgeone-function.template.js`) 2.5s SWR on MANIFEST_CACHE & ALIAS_CACHE
+    let remoteManifestDisabled = false;
+    const mockCos = http.createServer((req, res) => {
+      const reqPathname = new URL(req.url, 'http://127.0.0.1').pathname;
+      if (reqPathname === '/manifests/dpl_11223344.json') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            id: 'dpl_11223344',
+            project: 'demo',
+            immutableSubdomain: 'demo-11223344',
+            ...(remoteManifestDisabled
+              ? { disabled: true, disabledReason: '云端边缘 2.5s 禁用生效' }
+              : {}),
+            files: {
+              '/index.html': { sha256: 'sha_idx', size: 11, contentType: 'text/html' },
+            },
+            functions: {
+              '/api/hello': { sha256: 'fn_sha_1', runtime: 'edge-js', source: 'api/hello.js' },
+            },
+          })
+        );
+        return;
+      }
+      if (reqPathname === '/blobs/sha_idx') {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end('hello-cloud');
+        return;
+      }
+      res.writeHead(404);
+      res.end('Not Found');
+    });
+    await new Promise((r) => mockCos.listen(0, '127.0.0.1', r));
+    const cosPort = mockCos.address().port;
+
+    try {
+      const edgeOutPath = join(tmpRoot, 'edgeone.dist.js');
+      const { code: edgeCode } = generateEdgeFunctionCode({
+        cosOrigin: `http://127.0.0.1:${cosPort}`,
+        outputPath: edgeOutPath,
+        silent: true,
+      });
+      let registeredListener = null;
+      const sandbox = {
+        Request,
+        Response,
+        Headers,
+        URL,
+        fetch,
+        Date,
+        Map,
+        Set,
+        Promise,
+        JSON,
+        Math,
+        String,
+        Number,
+        Boolean,
+        Array,
+        Object,
+        RegExp,
+        Error,
+        encodeURIComponent,
+        decodeURIComponent,
+        addEventListener: (_type, fn) => {
+          registeredListener = fn;
+        },
+      };
+      vm.runInNewContext(edgeCode, sandbox);
+      assert.equal(typeof registeredListener, 'function');
+
+      async function invokeEdge(reqUrl) {
+        let respPromise = null;
+        const waitPromises = [];
+        registeredListener({
+          request: new Request(reqUrl, { headers: { Accept: 'application/json' } }),
+          respondWith(p) {
+            respPromise = p;
+          },
+          waitUntil(p) {
+            waitPromises.push(p);
+          },
+        });
+        const resp = await respPromise;
+        await Promise.all(waitPromises);
+        return resp;
+      }
+
+      const { code: apiWorkerCode } = generateProjectApiWorkerCode({
+        project: 'demo',
+        cosOrigin: `http://127.0.0.1:${cosPort}`,
+        silent: true,
+        functionsPool: {
+          fn_sha_1: {
+            sha256: 'fn_sha_1',
+            project: 'demo',
+            route: '/api/hello',
+            source: 'api/hello.js',
+            code: 'export default function() { return { ok: true, worker: "dedicated" }; }',
+          },
+        },
+        envsPool: {},
+      });
+      let apiListener = null;
+      const apiSandbox = {
+        ...sandbox,
+        addEventListener: (_type, fn) => {
+          apiListener = fn;
+        },
+      };
+      vm.runInNewContext(apiWorkerCode, apiSandbox);
+      assert.equal(typeof apiListener, 'function');
+
+      async function invokeApiWorker(reqUrl) {
+        let respPromise = null;
+        const waitPromises = [];
+        apiListener({
+          request: new Request(reqUrl, { headers: { Accept: 'application/json' } }),
+          respondWith(p) {
+            respPromise = p;
+          },
+          waitUntil(p) {
+            waitPromises.push(p);
+          },
+        });
+        const resp = await respPromise;
+        await Promise.all(waitPromises);
+        return resp;
+      }
+
+      // Initial request to immutable preview URL -> 200 OK on both routers
+      const r1 = await invokeEdge('https://demo-11223344.ship.example.com/');
+      assert.equal(r1.status, 200);
+      assert.equal(await r1.text(), 'hello-cloud');
+
+      const apiR1 = await invokeApiWorker('https://demo-11223344.ship.example.com/api/hello');
+      assert.equal(apiR1.status, 200);
+      assert.equal((await apiR1.json()).worker, 'dedicated');
+
+      // Flip manifest to disabled on COS and advance beyond 2.5s SWR TTL
+      remoteManifestDisabled = true;
+      await new Promise((r) => setTimeout(r, 2600));
+
+      // First request after 2.5s triggers background SWR revalidation; next request sees 503!
+      await invokeEdge('https://demo-11223344.ship.example.com/');
+      const r3 = await invokeEdge('https://demo-11223344.ship.example.com/');
+      assert.equal(r3.status, 503, 'Edge MANIFEST_CACHE SWR must reflect disabled manifest after 2.5s');
+      const r3Json = await r3.json();
+      assert.equal(r3Json.error, 'SERVICE_UNAVAILABLE');
+      assert.equal(r3Json.reason, '云端边缘 2.5s 禁用生效');
+
+      await invokeApiWorker('https://demo-11223344.ship.example.com/api/hello');
+      const apiR3 = await invokeApiWorker('https://demo-11223344.ship.example.com/api/hello');
+      assert.equal(
+        apiR3.status,
+        503,
+        'Dedicated API Worker MANIFEST_CACHE SWR must also reflect disabled manifest after 2.5s'
+      );
+      const apiR3Json = await apiR3.json();
+      assert.equal(apiR3Json.error, 'SERVICE_UNAVAILABLE');
+      assert.equal(apiR3Json.reason, '云端边缘 2.5s 禁用生效');
+    } finally {
+      await new Promise((r) => mockCos.close(r));
+    }
+
+    // 10. Verify withKeyWriteLock rejection does not trigger unhandledRejection
+    let unhandledRejected = null;
+    const onUnhandled = (err) => {
+      unhandledRejected = err;
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await assert.rejects(
+        () =>
+          withKeyWriteLock('test-reject-lock', async () => {
+            throw new Error('simulated-write-failure');
+          }),
+        /simulated-write-failure/
+      );
+      await new Promise((r) => setImmediate(r));
+      assert.equal(
+        unhandledRejected,
+        null,
+        'Rejected task in withKeyWriteLock must not emit unhandledRejection'
+      );
+      const afterRecovery = await withKeyWriteLock('test-reject-lock', async () => 'recovered-ok');
+      assert.equal(afterRecovery, 'recovered-ok');
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  } finally {
+    await new Promise((r) => mockScfServer.close(r));
     rmSync(tmpRoot, { recursive: true, force: true });
   }
 });

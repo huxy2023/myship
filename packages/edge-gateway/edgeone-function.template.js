@@ -97,16 +97,63 @@ async function fetchCosJson(key, cacheTtl = 0) {
   }
 }
 
-async function resolveDeploymentId(subdomain, event) {
+function escapeHtml(str) {
+  return String(str || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function buildUnavailableResponse(request, info) {
+  const rawPathname = decodeURIComponent(new URL(request.url).pathname);
+  const method = (request.method || 'GET').toUpperCase();
+  const prefix = info.backendPrefix || '/api';
+  const isBackendPath =
+    prefix === '/' ||
+    rawPathname === prefix ||
+    rawPathname.startsWith(prefix.endsWith('/') ? prefix : `${prefix}/`) ||
+    rawPathname.startsWith('/api/');
+  const accept = (request.headers && request.headers.get && request.headers.get('accept')) || '';
+  const commonHeaders = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With',
+    'Cache-Control': 'no-store, no-cache, must-revalidate',
+    'Retry-After': '120',
+    'X-MyShip-Engine': 'EdgeOne-CAS-Gateway/2.2-SCF-Backend',
+    'X-MyShip-Status': 'offline',
+    'X-MyShip-Offline-Scope': info.scope || 'project',
+    'X-MyShip-Project': info.project || 'default',
+    'X-MyShip-Subdomain': info.subdomain || '',
+    'X-MyShip-Deployment-Id': info.deploymentId || '',
+  };
+  if (method === 'OPTIONS') return new Response(null, { status: 204, headers: commonHeaders });
+  const reasonText = info.reason || '站点维护中 / 管理员已暂停访问';
+  if (isBackendPath || accept.includes('application/json')) {
+    return new Response(
+      JSON.stringify({
+        ok: false, status: 503, error: 'SERVICE_UNAVAILABLE', message: reasonText,
+        scope: info.scope || 'project', reason: reasonText, project: info.project || 'default',
+        subdomain: info.subdomain || '', deploymentId: info.deploymentId || '',
+      }),
+      { status: 503, headers: Object.assign({}, commonHeaders, { 'Content-Type': 'application/json; charset=UTF-8' }) }
+    );
+  }
+  const scopeBadge =
+    info.scope === 'deployment' ? '当前构建版本已停用' : info.scope === 'alias' ? '当前子域名已下线' : '项目已暂停访问';
+  return new Response(
+    `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>503 站点已下线维护 - MyShip</title></head><body style="font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#f8fafc;padding:64px 24px;text-align:center;margin:0;"><div style="max-width:520px;margin:0 auto;background:#1e293b;border:1px solid #334155;border-radius:16px;padding:36px 28px;"><div style="display:inline-block;padding:4px 12px;border-radius:999px;background:rgba(245,158,11,0.15);color:#fbbf24;font-size:13px;font-weight:600;margin-bottom:16px;">⏸️ 503 · ${escapeHtml(scopeBadge)}</div><h1 style="font-size:22px;margin:0 0 12px;">${escapeHtml(reasonText)}</h1><p style="color:#94a3b8;font-size:14px;margin:0 0 20px;">项目 <code>${escapeHtml(info.project || 'default')}</code> (${escapeHtml(info.subdomain || '')}) 当前处于下线保护状态。</p><div style="font-size:12px;color:#64748b;border-top:1px solid #334155;padding-top:14px;">可通过 <code>myship online ${escapeHtml(info.project || '')}</code> 秒级恢复上线</div></div></body></html>`,
+    { status: 503, headers: Object.assign({}, commonHeaders, { 'Content-Type': 'text/html; charset=UTF-8' }) }
+  );
+}
+
+async function resolveAliasRecord(subdomain, event) {
   if (subdomain === '_myship_probe') {
     return null;
   }
   if (subdomain.startsWith('dpl-')) {
-    return subdomain.replace(/^dpl-/, 'dpl_');
+    return { deploymentId: subdomain.replace(/^dpl-/, 'dpl_'), isImmutableUrl: true };
   }
   const immMatch = subdomain.match(/-([0-9a-f]{8})$/);
   if (immMatch) {
-    return `dpl_${immMatch[1]}`;
+    return { deploymentId: `dpl_${immMatch[1]}`, isImmutableUrl: true };
   }
 
   const now = Date.now();
@@ -115,16 +162,17 @@ async function resolveDeploymentId(subdomain, event) {
   const refreshTask = async () => {
     const aliasData = await fetchCosJson(`aliases/${subdomain}.json`, 0);
     if (aliasData && aliasData.deploymentId) {
-      ALIAS_CACHE.set(subdomain, { deploymentId: aliasData.deploymentId, ts: Date.now() });
-      return aliasData.deploymentId;
+      ALIAS_CACHE.set(subdomain, { record: aliasData, ts: Date.now() });
+      return aliasData;
     }
+    ALIAS_CACHE.delete(subdomain);
     return null;
   };
 
   if (cached) {
     const age = now - cached.ts;
     if (age < 2500) {
-      return cached.deploymentId;
+      return cached.record;
     }
     if (age < 60000) {
       if (event && typeof event.waitUntil === 'function') {
@@ -132,26 +180,47 @@ async function resolveDeploymentId(subdomain, event) {
       } else {
         refreshTask();
       }
-      return cached.deploymentId;
+      return cached.record;
     }
   }
 
   return await refreshTask();
 }
 
-async function resolveManifest(deploymentId) {
-  if (MANIFEST_CACHE.has(deploymentId)) {
-    return MANIFEST_CACHE.get(deploymentId);
-  }
-  const manifest = await fetchCosJson(`manifests/${deploymentId}.json`, 31536000);
-  if (manifest && (manifest.files || manifest.functions || manifest.backend)) {
-    if (MANIFEST_CACHE.size >= 64) {
-      const oldestKey = MANIFEST_CACHE.keys().next().value;
-      MANIFEST_CACHE.delete(oldestKey);
+async function resolveManifest(deploymentId, event) {
+  const now = Date.now();
+  const cached = MANIFEST_CACHE.get(deploymentId);
+
+  const refreshTask = async () => {
+    const manifest = await fetchCosJson(`manifests/${deploymentId}.json`, 0);
+    if (manifest && (manifest.files || manifest.functions || manifest.backend)) {
+      if (!MANIFEST_CACHE.has(deploymentId) && MANIFEST_CACHE.size >= 64) {
+        const oldestKey = MANIFEST_CACHE.keys().next().value;
+        MANIFEST_CACHE.delete(oldestKey);
+      }
+      MANIFEST_CACHE.set(deploymentId, { manifest, ts: Date.now() });
+      return manifest;
     }
-    MANIFEST_CACHE.set(deploymentId, manifest);
+    MANIFEST_CACHE.delete(deploymentId);
+    return null;
+  };
+
+  if (cached) {
+    const age = now - cached.ts;
+    if (age < 2500) {
+      return cached.manifest;
+    }
+    if (age < 60000) {
+      if (event && typeof event.waitUntil === 'function') {
+        event.waitUntil(refreshTask());
+      } else {
+        refreshTask();
+      }
+      return cached.manifest;
+    }
   }
-  return manifest;
+
+  return await refreshTask();
 }
 
 /**
@@ -257,15 +326,16 @@ async function handleRequest(request, event) {
   const host = request.headers.get('host') || url.host;
   const subdomain = extractSubdomain(host);
 
-  // 1. 解析子域名对应的 Deployment ID (支持内存 SWR 秒级响应)
-  const deploymentId = await resolveDeploymentId(subdomain, event);
+  // 1. 解析子域名对应的 Alias 记录与 Deployment ID (支持内存 SWR 秒级响应)
+  const aliasRecord = await resolveAliasRecord(subdomain, event);
+  const deploymentId = aliasRecord && aliasRecord.deploymentId ? aliasRecord.deploymentId : null;
 
   if (!deploymentId) {
     return new Response(
       `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>404 Subdomain Not Found - MyShip</title></head>
       <body style="font-family:system-ui;background:#0f172a;color:#f8fafc;padding:48px;text-align:center;">
-        <h1>404 — 未找到子域名绑定: <code>${subdomain}</code></h1>
-        <p style="color:#94a3b8;">Host: ${host} | 尚未在 COS aliases/${subdomain}.json 中注册部署指针。</p>
+        <h1>404 — 未找到子域名绑定: <code>${escapeHtml(subdomain)}</code></h1>
+        <p style="color:#94a3b8;">Host: ${escapeHtml(host)} | 尚未在 COS aliases/${escapeHtml(subdomain)}.json 中注册部署指针。</p>
       </body></html>`,
       {
         status: 404,
@@ -278,13 +348,40 @@ async function handleRequest(request, event) {
     );
   }
 
-  // 2. 读取不可变 Manifest 清单 (命中边缘内存则 0ms)
+  if (aliasRecord && (aliasRecord.disabled === true || aliasRecord.projectDisabled === true)) {
+    const isAliasDisabled = aliasRecord.disabled === true;
+    return buildUnavailableResponse(request, {
+      subdomain,
+      deploymentId,
+      project: aliasRecord.project || 'default',
+      scope: isAliasDisabled ? 'alias' : 'project',
+      reason:
+        (isAliasDisabled ? aliasRecord.disabledReason : aliasRecord.projectDisabledReason) ||
+        '站点维护中 / 管理员已暂停访问',
+    });
+  }
+
+  // 2. 读取 Manifest 清单 (支持 2.5s SWR 刷新，命中边缘内存则 0ms)
   const manifestHit = MANIFEST_CACHE.has(deploymentId);
-  const manifest = await resolveManifest(deploymentId);
+  const manifest = await resolveManifest(deploymentId, event);
   if (!manifest || (!manifest.files && !manifest.functions && !manifest.backend)) {
     return new Response(`Deployment Manifest Not Found: ${deploymentId}`, {
       status: 404,
       headers: { 'Content-Type': 'text/plain; charset=UTF-8' },
+    });
+  }
+
+  if (manifest.disabled === true || manifest.projectDisabled === true) {
+    const isDplDisabled = manifest.disabled === true;
+    return buildUnavailableResponse(request, {
+      subdomain,
+      deploymentId,
+      project: manifest.project || (aliasRecord && aliasRecord.project) || 'default',
+      scope: isDplDisabled ? 'deployment' : 'project',
+      reason:
+        (isDplDisabled ? manifest.disabledReason : manifest.projectDisabledReason) ||
+        (isDplDisabled ? '当前部署版本已被管理员禁用' : '站点维护中 / 管理员已暂停访问'),
+      backendPrefix: manifest.backend && manifest.backend.prefix ? manifest.backend.prefix : '/api',
     });
   }
 
