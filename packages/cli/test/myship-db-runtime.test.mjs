@@ -1,4 +1,5 @@
-import test from 'node:test';
+import test, { before, after } from 'node:test';
+import { Console } from 'node:console';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import net from 'node:net';
@@ -23,6 +24,14 @@ import {
   runUseCommand,
   resolveProjectResourceEnv,
 } from '../myship.mjs';
+
+const originalConsole = globalThis.console;
+before(() => {
+  globalThis.console = new Console({ stdout: process.stderr, stderr: process.stderr });
+});
+after(() => {
+  globalThis.console = originalConsole;
+});
 
 test('11. Multi-Engine DB Runtime, Pool Reuse, Transaction Schema Isolation & Security Suite', async (t) => {
   const tmpRoot = mkdtempSync(join(tmpdir(), 'myship-codex-review-'));

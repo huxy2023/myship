@@ -1,4 +1,5 @@
-import test from 'node:test';
+import test, { before, after } from 'node:test';
+import { Console } from 'node:console';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import net from 'node:net';
@@ -19,6 +20,14 @@ import {
   runUseCommand,
   resolveProjectResourceEnv,
 } from '../myship.mjs';
+
+const originalConsole = globalThis.console;
+before(() => {
+  globalThis.console = new Console({ stdout: process.stderr, stderr: process.stderr });
+});
+after(() => {
+  globalThis.console = originalConsole;
+});
 
 test('8. Declarative Resource Registration (`myship use storage|db`): COS files, CloudBase PG schema isolation, Turso & Cloudflare D1 auto-provisioning, and local node:sqlite parity', async (t) => {
   const tmpRoot = mkdtempSync(join(tmpdir(), 'myship-test-resources-'));

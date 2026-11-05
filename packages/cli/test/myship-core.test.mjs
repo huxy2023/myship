@@ -1,4 +1,5 @@
-import test from 'node:test';
+import test, { before, after } from 'node:test';
+import { Console } from 'node:console';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import vm from 'node:vm';
@@ -55,6 +56,16 @@ import { handleEdgeRequest } from '../../edge-gateway/local-gateway.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '../../..');
+
+// Node 22 `node --test` uses child stdout for binary V8-serialized test events;
+// route business console output to stderr so multi-byte UTF-8 logs never collide with protocol frames.
+const originalConsole = globalThis.console;
+before(() => {
+  globalThis.console = new Console({ stdout: process.stderr, stderr: process.stderr });
+});
+after(() => {
+  globalThis.console = originalConsole;
+});
 
 test('1. Package & module integrity: npm pack includes all CLI modules and excludes tests', () => {
   const cliDir = resolve(__dirname, '..');
