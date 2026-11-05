@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MyShip Console — 全栈部署与云资源管控台</title>
+  <style>/* __CONSOLE_CSS__ */</style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-left">
+      <div class="brand">
+        <span class="brand-mark">M</span>
+        <span>MyShip Console</span>
+      </div>
+      <div class="topbar-divider"></div>
+      <span class="meta-pill" id="modeBadge">__MODE_LABEL__</span>
+      <span class="meta-pill mono" id="domainBadge">加载中...</span>
+    </div>
+    <div class="topbar-right">
+      <div class="topbar-stats">
+        <span>项目 <strong id="statProjects">-</strong></span>
+        <span>构建快照 <strong id="statManifests">-</strong></span>
+        <span>文件块 <strong id="statBlobs">-</strong></span>
+      </div>
+      <button class="btn" id="themeToggleBtn" onclick="toggleTheme()" title="切换浅色/深色外观">
+        <svg class="svg-icon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+        <span id="themeToggleLabel">深色</span>
+      </button>
+      <button class="btn" onclick="refreshAll()" title="重新同步状态">
+        <svg class="svg-icon" viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>
+        <span>刷新</span>
+      </button>
+    </div>
+  </header>
+
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="sidebar-top">
+        <div>
+          <div class="sidebar-group-label">
+            <span>项目列表</span>
+            <span id="sidebarProjectsCount">0</span>
+          </div>
+          <input
+            type="text"
+            class="sidebar-search"
+            id="projectSearchInput"
+            placeholder="搜索项目名..."
+            oninput="onProjectSearchInput()"
+          />
+          <div class="project-list" id="projectList"></div>
+        </div>
+
+        <div>
+          <div class="sidebar-group-label">
+            <span>当前项目导航</span>
+          </div>
+          <div class="nav-list">
+            <button class="nav-btn active" id="nav-releases" onclick="switchView('releases')">
+              <span class="nav-btn-left">
+                <svg class="svg-icon" viewBox="0 0 24 24"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></svg>
+                <span>发布与域名</span>
+              </span>
+              <span class="nav-badge" id="navCountReleases">0</span>
+            </button>
+            <button class="nav-btn" id="nav-logs" onclick="switchView('logs')">
+              <span class="nav-btn-left">
+                <svg class="svg-icon" viewBox="0 0 24 24"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/></svg>
+                <span>运行日志</span>
+              </span>
+            </button>
+            <button class="nav-btn" id="nav-data" onclick="switchView('data')">
+              <span class="nav-btn-left">
+                <svg class="svg-icon" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>
+                <span>数据与存储</span>
+              </span>
+              <span class="nav-badge" id="navCountData">-</span>
+            </button>
+            <button class="nav-btn" id="nav-settings" onclick="switchView('settings')">
+              <span class="nav-btn-left">
+                <svg class="svg-icon" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+                <span>环境变量与设置</span>
+              </span>
+              <span class="nav-badge" id="navCountEnv">-</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="sidebar-bottom">
+        <button class="nav-btn" id="nav-gc" onclick="switchView('gc')">
+          <span class="nav-btn-left">
+            <svg class="svg-icon" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
+            <span>全局存储清理</span>
+          </span>
+          <span class="nav-badge">全局</span>
+        </button>
+      </div>
+    </aside>
+
+    <main class="main-canvas">
+      <!-- Compact Project Header (hidden in Global GC view) -->
+      <section class="project-header" id="projectHeaderCard">
+        <div class="project-header-top">
+          <div class="project-title-row">
+            <h1 class="project-title mono" id="currentProjectTitle">-</h1>
+            <span id="projectHealthBadge"></span>
+            <span id="primaryDomainLink"></span>
+          </div>
+          <div class="row-actions" id="projectHeaderActions"></div>
+        </div>
+        <div class="project-meta-row" id="projectMetaRow"></div>
+        <div id="projectAlertBanner" style="display:none;"></div>
+      </section>
+
+      <!-- View 1: Releases (Domains + Deployments + Diff) -->
+      <section class="view-panel active" id="view-releases">
+        <!-- Upper Card: Domains & Traffic Routing -->
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title-group">
+              <span class="card-title">访问入口 (Domains)</span>
+              <span class="card-subtitle">管理生产主域名与预览子域名指向的构建版本</span>
+            </div>
+          </div>
+          <div class="card-toolbar">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex:1;">
+              <span style="font-size:12px;font-weight:600;color:var(--text-secondary);">绑定子域名:</span>
+              <input
+                type="text"
+                class="input mono"
+                id="newAliasSub"
+                placeholder="输入前缀，如 staging 或 pr-12"
+                style="width:200px;"
+                oninput="onAliasInputPreview()"
+              />
+              <span style="color:var(--muted);">→</span>
+              <select class="select mono" id="newAliasDplSelect" style="min-width:210px;"></select>
+              <button class="btn btn-primary" onclick="bindNewAlias()">绑定 / 切流</button>
+            </div>
+            <div id="aliasPreviewHint" class="mono" style="font-size:11.5px;color:var(--muted);"></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>访问域名</th>
+                  <th>当前指向版本</th>
+                  <th>访问状态</th>
+                  <th>流量切换与版本操作</th>
+                </tr>
+              </thead>
+              <tbody id="aliasesTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Lower Card: Deployment History + Collapsible Diff -->
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title-group">
+              <span class="card-title">部署历史 (Deployments)</span>
+              <span class="badge badge-muted" id="deploymentsCountBadge">0</span>
+              <span class="card-subtitle">点击版本 ID 查看构建产物明细与永久预览地址</span>
+            </div>
+            <div class="row-actions">
+              <button class="btn" id="toggleDiffBtn" onclick="toggleDiffPanel()">
+                <svg class="svg-icon" viewBox="0 0 24 24"><path d="M16 3h5v5"/><path d="M8 3H3v5"/><path d="M12 22v-8.3a4 4 0 0 0-1.172-2.872L3 3"/><path d="m15 9 6-6"/></svg>
+                <span>版本比较 (Diff)</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="diff-panel" id="diffPanel">
+            <div class="diff-controls">
+              <span style="font-size:12px;font-weight:600;color:var(--text-secondary);">基准版本 (Before):</span>
+              <select class="select mono" id="diffBaseSelect" style="min-width:220px;"></select>
+              <button class="btn btn-sm" onclick="swapDiffSelection()" title="交换基准与目标版本">⇄ 交换</button>
+              <span style="font-size:12px;font-weight:600;color:var(--text-secondary);">对比版本 (After):</span>
+              <select class="select mono" id="diffTargetSelect" style="min-width:220px;"></select>
+              <button class="btn btn-primary" onclick="runDiffCompare()">对比变更</button>
+            </div>
+            <div id="diffResultArea" style="margin-top:10px;"></div>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>构建版本 ID</th>
+                  <th>绑定域名</th>
+                  <th>运行形态与规模</th>
+                  <th>发布时间</th>
+                  <th>版本状态</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="deploymentsTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- View 2: Logs -->
+      <section class="view-panel" id="view-logs">
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title-group">
+              <span class="card-title">后端运行时状态</span>
+              <span class="card-subtitle">当前生产流量与最新发布的云函数 (SCF) 实例版本</span>
+            </div>
+          </div>
+          <div class="card-body" id="backendStatusSummary"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title-group">
+              <span class="card-title">请求与函数日志</span>
+              <span class="card-subtitle" id="logsSummaryText">加载中...</span>
+            </div>
+            <div class="row-actions">
+              <label style="display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--text-secondary);cursor:pointer;">
+                <input type="checkbox" id="logsErrorsOnlyCheck" onchange="loadLogs()" />
+                <span>仅看错误</span>
+              </label>
+              <select class="select" id="logsLimitSelect" onchange="loadLogs()">
+                <option value="20">最近 20 条</option>
+                <option value="50" selected>最近 50 条</option>
+                <option value="100">最近 100 条</option>
+              </select>
+              <button class="btn" onclick="loadLogs()">刷新日志</button>
+            </div>
+          </div>
+          <div id="logsContainer"></div>
+        </div>
+      </section>
+
+      <!-- View 3: Data (Database / KV / Files) -->
+      <section class="view-panel" id="view-data">
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title-group">
+              <div class="subtabs">
+                <button class="subtab-btn active" id="dataSubtabDb" onclick="switchDataSubtab('db')">数据库 (context.db)</button>
+                <button class="subtab-btn" id="dataSubtabKv" onclick="switchDataSubtab('kv')">键值存储 (context.storage)</button>
+                <button class="subtab-btn" id="dataSubtabFiles" onclick="switchDataSubtab('files')">对象文件 (context.files)</button>
+              </div>
+              <span class="card-subtitle" id="resourcesMetaBar"></span>
+            </div>
+            <div class="row-actions">
+              <button class="btn" onclick="loadResources(true)">刷新数据</button>
+            </div>
+          </div>
+
+          <!-- Sub-panel: Database -->
+          <div id="dataPanelDb">
+            <div class="split-explorer">
+              <div class="explorer-sidebar">
+                <div style="padding:8px 10px;border-bottom:1px solid var(--border);font-size:11px;font-weight:600;color:var(--muted);display:flex;justify-content:space-between;">
+                  <span>数据表清单</span>
+                  <span id="dbTablesCount">0</span>
+                </div>
+                <div class="explorer-list" id="dbTablesList"></div>
+              </div>
+              <div class="explorer-main" id="dbPreviewMain">
+                <div class="empty-state">加载数据库状态中...</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Sub-panel: KV Storage -->
+          <div id="dataPanelKv" style="display:none;">
+            <div class="split-explorer">
+              <div class="explorer-sidebar">
+                <div style="padding:8px;">
+                  <input
+                    type="text"
+                    class="input"
+                    id="kvSearchInput"
+                    placeholder="过滤 Key 名称..."
+                    style="width:100%;height:28px;"
+                    oninput="renderKvKeysList()"
+                  />
+                </div>
+                <div class="explorer-list" id="kvKeysList"></div>
+              </div>
+              <div class="explorer-main" id="kvPreviewMain">
+                <div class="empty-state">从左侧选择一个 Key 查看 JSON 内容</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Sub-panel: Files -->
+          <div id="dataPanelFiles" style="display:none;">
+            <div class="card-toolbar">
+              <input
+                type="text"
+                class="input"
+                id="filesSearchInput"
+                placeholder="搜索文件路径..."
+                style="width:260px;"
+                oninput="renderFilesTable()"
+              />
+              <span class="mono" style="font-size:11.5px;color:var(--muted);" id="filesPrefixLabel"></span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>文件路径 (Key)</th>
+                    <th style="width:220px;">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="filesTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- View 4: Settings (Env Vars + Danger Zone) -->
+      <section class="view-panel" id="view-settings">
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title-group">
+              <span class="card-title">环境变量 (Environment Variables)</span>
+              <span class="badge badge-muted" id="envCountBadge">0</span>
+              <span class="card-subtitle" id="envRuntimeHint">注入至项目的边缘函数与云函数运行时</span>
+            </div>
+            <div class="row-actions">
+              <label style="display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--text-secondary);cursor:pointer;">
+                <input type="checkbox" id="envRevealCheck" onchange="loadEnvVars()" />
+                <span>显示全部明文</span>
+              </label>
+              <button class="btn" onclick="toggleBatchEnvBox()">批量导入 .env</button>
+              <button class="btn" onclick="loadEnvVars()">刷新</button>
+            </div>
+          </div>
+
+          <div class="card-toolbar">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;width:100%;">
+              <span style="font-size:12px;font-weight:600;color:var(--text-secondary);" id="envFormModeLabel">新增或更新:</span>
+              <input
+                type="text"
+                class="input mono"
+                id="envKeyInput"
+                placeholder="KEY (如 DATABASE_URL)"
+                style="width:220px;"
+              />
+              <input
+                type="text"
+                class="input mono"
+                id="envValInput"
+                placeholder="VALUE"
+                style="flex:1;min-width:220px;"
+              />
+              <button class="btn btn-primary" id="envSaveBtn" onclick="saveSingleEnv()">保存变量</button>
+              <button class="btn" id="envCancelEditBtn" onclick="cancelEditEnv()" style="display:none;">取消编辑</button>
+            </div>
+          </div>
+
+          <div id="batchEnvBox" style="display:none;padding:14px 16px;background:var(--bg);border-bottom:1px solid var(--border);">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+              <span style="font-size:12px;font-weight:600;color:var(--text);">粘贴 .env 格式内容（支持多行引号与行内 # 注释）</span>
+              <span id="envBatchPreviewSummary" style="font-size:12px;color:var(--text-secondary);"></span>
+            </div>
+            <textarea
+              class="textarea mono"
+              id="envBatchTextarea"
+              rows="5"
+              style="width:100%;"
+              placeholder="API_KEY=sk-xxxx&#10;FEATURE_FLAG=true"
+              oninput="previewBatchEnv()"
+            ></textarea>
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px;">
+              <button class="btn" onclick="toggleBatchEnvBox(false)">收起</button>
+              <button class="btn btn-primary" onclick="saveBatchEnv()">确认批量写入</button>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:260px;">变量名 (Key)</th>
+                  <th>当前值 (Value)</th>
+                  <th style="width:200px;">操作</th>
+                </tr>
+              </thead>
+              <tbody id="envTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card danger-zone">
+          <div class="card-header">
+            <div class="card-title-group">
+              <span class="card-title">项目危险操作区 (Danger Zone)</span>
+            </div>
+          </div>
+          <div class="card-body" style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;">
+            <div>
+              <div style="font-weight:600;color:var(--text);margin-bottom:2px;">彻底销毁当前项目</div>
+              <div style="font-size:12px;color:var(--text-secondary);">
+                删除该项目下所有域名绑定、历史构建版本、环境变量及无引用的底层文件块。执行前将先展示待清理资源预检清单。
+              </div>
+            </div>
+            <button class="btn btn-danger" onclick="openPurgeProjectModal()">销毁项目...</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- View 5: Global GC -->
+      <section class="view-panel" id="view-gc">
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title-group">
+              <span class="card-title">全局存储垃圾回收 (Global Storage GC)</span>
+              <span class="badge badge-blue">作用于全部项目</span>
+            </div>
+          </div>
+          <div class="card-body" style="display:flex;flex-direction:column;gap:14px;">
+            <div style="font-size:12.5px;color:var(--text-secondary);line-height:1.6;">
+              扫描所有项目的历史构建快照与底层 CAS 文件块。<strong>所有当前被域名指向的版本</strong>及其<strong>上一回滚候选版本 (previousDeploymentId)</strong> 均受自动保护，绝不会被回收。
+            </div>
+            <div style="display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;padding:12px 14px;background:var(--panel-subtle);border:1px solid var(--border);border-radius:8px;">
+              <div>
+                <div style="font-size:11px;font-weight:600;color:var(--muted);margin-bottom:4px;">每项目保留最新快照数</div>
+                <input type="number" class="input mono" id="gcKeepInput" value="10" min="2" max="100" style="width:130px;" />
+              </div>
+              <div>
+                <div style="font-size:11px;font-weight:600;color:var(--muted);margin-bottom:4px;">或按发布时间清理</div>
+                <select class="select" id="gcOlderThanSelect" onchange="onGcOlderThanChange()" style="width:190px;">
+                  <option value="">不限时间 (仅按保留数)</option>
+                  <option value="7d">清理 7 天前的非活跃快照</option>
+                  <option value="30d">清理 30 天前的非活跃快照</option>
+                  <option value="90d">清理 90 天前的非活跃快照</option>
+                </select>
+              </div>
+              <button class="btn btn-primary" onclick="runGc(true)">1. 扫描可清理项 (Dry-Run)</button>
+              <button class="btn btn-danger" id="gcExecuteBtn" onclick="confirmExecuteGc()">2. 执行清理...</button>
+            </div>
+            <div id="gcResultBox">
+              <div class="empty-state">请先点击「扫描可清理项 (Dry-Run)」查看本次将被回收的快照与孤儿文件块明细。</div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Slide-over Deployment Detail Drawer -->
+  <div class="drawer-overlay" id="deploymentDrawerOverlay" onclick="if(event.target===this)closeDeploymentDrawer()">
+    <div class="drawer">
+      <div class="drawer-header">
+        <div>
+          <div style="font-size:14px;font-weight:700;" class="mono" id="deploymentDrawerTitle">构建详情</div>
+          <div style="font-size:11.5px;color:var(--muted);" id="deploymentDrawerSubtitle"></div>
+        </div>
+        <button class="btn btn-sm" onclick="closeDeploymentDrawer()">关闭</button>
+      </div>
+      <div class="drawer-body" id="deploymentDrawerBody"></div>
+    </div>
+  </div>
+
+  <!-- Action Confirmation & Form Modal -->
+  <div class="modal-overlay" id="confirmModal" onclick="if(event.target===this)closeModal()">
+    <div class="modal">
+      <div class="modal-title" id="modalTitle">确认操作</div>
+      <div class="modal-desc" id="modalDesc"></div>
+      <div id="modalFormArea"></div>
+      <div class="modal-error" id="modalErrorBox"></div>
+      <div class="modal-actions">
+        <button class="btn" id="modalCancelBtn" onclick="closeModal()">取消</button>
+        <button class="btn btn-primary" id="modalConfirmBtn">确认执行</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>/* __CONSOLE_CLIENT_JS__ */</script>
+</body>
+</html>

@@ -1,6 +1,6 @@
 {
   "name": "@myship/cli",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "license": "MIT",
   "type": "module",
   "description": "Self-hosted BYOC full-stack & CAS deployment engine on your own Tencent Cloud EdgeOne, COS, SCF & Serverless Databases",
@@ -30,6 +30,7 @@
   },
   "files": [
     "packages/cli/*.mjs",
+    "packages/cli/console/**",
     "packages/edge-gateway/edgeone-function.template.js",
     "packages/edge-gateway/edgeone-api-worker.template.js",
     "packages/edge-gateway/local-gateway.mjs",

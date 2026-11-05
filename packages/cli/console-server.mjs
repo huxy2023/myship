@@ -17,6 +17,7 @@ import {
   createLocalFileStorage,
   createCloudStorage,
 } from './storage-client.mjs';
+import { createDatabaseClient } from './db-client.mjs';
 import {
   DEFAULT_STORAGE_DIR,
   normalizeDomainToken,
@@ -339,6 +340,36 @@ export function createConsoleRequestHandler({
         return;
       }
 
+      if (isLocal && pathname.startsWith('/_myship_files/')) {
+        const rest = decodeURIComponent(pathname.slice('/_myship_files/'.length));
+        const slashIdx = rest.indexOf('/');
+        if (slashIdx <= 0) {
+          return sendJson(res, 400, { ok: false, error: 'Invalid local file path' });
+        }
+        const fileProj = normalizeDomainToken(rest.slice(0, slashIdx)) || 'default';
+        const fileKey = rest.slice(slashIdx + 1);
+        const rawVars = getLocalProjectEnv(fileProj, storageDir);
+        const localFiles = createLocalFileStorage(cwd, fileProj, {
+          ...process.env,
+          ...rawVars,
+        });
+        const buf = await localFiles.get(fileKey);
+        if (!buf) {
+          res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end('404 File Not Found');
+          return;
+        }
+        res.writeHead(200, {
+          'Content-Type': buf.contentType || 'application/octet-stream',
+          'Content-Length': buf.length,
+          'Cache-Control': 'no-store',
+          'Content-Security-Policy': 'sandbox',
+          'X-Content-Type-Options': 'nosniff',
+        });
+        res.end(buf);
+        return;
+      }
+
       if (!pathname.startsWith('/api/console/')) {
         return sendJson(res, 404, { ok: false, error: `Not Found: ${pathname}` });
       }
@@ -485,9 +516,22 @@ export function createConsoleRequestHandler({
         const reveal =
           urlObj.searchParams.get('reveal') === '1' ||
           urlObj.searchParams.get('reveal') === 'true';
+        const singleKey = String(urlObj.searchParams.get('key') || '').trim();
         const rawVars = isLocal
           ? getLocalProjectEnv(project, storageDir)
           : await getRemoteProjectEnv(project);
+        if (singleKey) {
+          const exists = Object.prototype.hasOwnProperty.call(rawVars, singleKey);
+          const rawVal = exists ? rawVars[singleKey] : null;
+          return sendJson(res, 200, {
+            ok: true,
+            project,
+            key: singleKey,
+            reveal,
+            exists,
+            value: exists ? (reveal ? rawVal : maskEnvValue(rawVal)) : null,
+          });
+        }
         const outVars = {};
         for (const k of Object.keys(rawVars).sort()) {
           outVars[k] = reveal ? rawVars[k] : maskEnvValue(rawVars[k]);
@@ -516,10 +560,13 @@ export function createConsoleRequestHandler({
             storageDir,
             cwd,
           });
+          const totalCount = Object.keys(updated).length;
           return sendJson(res, 200, {
             ok: true,
             project,
-            count: Object.keys(updated).length,
+            importedCount: 1,
+            totalCount,
+            count: totalCount,
           });
         }
         if (action === 'set-batch' || action === 'import') {
@@ -547,10 +594,13 @@ export function createConsoleRequestHandler({
             storageDir,
             cwd,
           });
+          const totalCount = Object.keys(updated).length;
           return sendJson(res, 200, {
             ok: true,
             project,
-            count: Object.keys(updated).length,
+            importedCount: validArgs.length,
+            totalCount,
+            count: totalCount,
           });
         }
         if (action === 'rm' || action === 'delete') {
@@ -563,10 +613,12 @@ export function createConsoleRequestHandler({
             storageDir,
             cwd,
           });
+          const totalCount = Object.keys(updated).length;
           return sendJson(res, 200, {
             ok: true,
             project,
-            count: Object.keys(updated).length,
+            totalCount,
+            count: totalCount,
           });
         }
         return sendJson(res, 400, { ok: false, error: `不支持的 env 操作: ${action}` });
@@ -592,6 +644,11 @@ export function createConsoleRequestHandler({
             retainedManifestsCount: plan.retainedManifests.length,
             expiredManifestsCount: plan.expiredManifests.length,
             expiredManifestIds: plan.expiredManifests.map((m) => m.id),
+            expiredManifests: plan.expiredManifests.map((m) => ({
+              id: m.id,
+              project: m.project || inferProjectFromRecord(m, 'default'),
+              createdAt: m.createdAt || null,
+            })),
             orphanBlobsCount: plan.orphanBlobKeys.length,
             orphanFnsCount: plan.orphanFnKeys.length,
             activeRoutes: plan.activeRoutes,
@@ -731,9 +788,8 @@ export function createConsoleRequestHandler({
           ? getLocalProjectEnv(project, storageDir)
           : await getRemoteProjectEnv(project);
 
-        const dbProvider =
+        const envDbProvider =
           rawVars.MYSHIP_DB_PROVIDER ||
-          localResourcesCfg?.db?.provider ||
           (rawVars.TURSO_DATABASE_URL
             ? 'turso'
             : rawVars.NEON_DATABASE_URL
@@ -742,9 +798,20 @@ export function createConsoleRequestHandler({
             ? 'd1'
             : rawVars.MYSQL_URL
             ? 'mysql'
+            : rawVars.TCB_ENV_ID
+            ? 'cloudbase-pg'
             : rawVars.DATABASE_URL || rawVars.PGHOST
             ? 'pg'
             : null);
+
+        const dbProvider = envDbProvider || localResourcesCfg?.db?.provider || null;
+        const configSource = envDbProvider
+          ? 'env'
+          : localResourcesCfg?.db?.provider
+          ? 'project.json'
+          : isLocal
+          ? 'local-sqlite'
+          : 'none';
 
         const dbIsolation =
           rawVars.MYSHIP_DB_ISOLATION || localResourcesCfg?.db?.isolation || 'default';
@@ -755,27 +822,36 @@ export function createConsoleRequestHandler({
           rawVars.CF_D1_DATABASE_NAME ||
           rawVars.TURSO_DATABASE_URL ||
           rawVars.NEON_DATABASE_URL ||
+          rawVars.TCB_ENV_ID ||
           rawVars.DATABASE_URL ||
+          localResourcesCfg?.db?.databaseName ||
           '';
+
+        const rawStorageEnv = rawVars.MYSHIP_STORAGE_ENV
+          ? normalizeDomainToken(rawVars.MYSHIP_STORAGE_ENV)
+          : '';
+        const envSub = rawStorageEnv && rawStorageEnv !== 'prod' ? `${rawStorageEnv}/` : '';
+        const dataPrefix = `data/${project}/${envSub}`;
+        const filesPrefix = `files/${project}/${envSub}`;
 
         let dataKeys = [];
         let fileKeys = [];
         if (isLocal) {
-          const localData = createLocalPersistentStorage(cwd, project);
-          const localFiles = createLocalFileStorage(cwd, project);
+          const localData = createLocalPersistentStorage(cwd, project, rawVars);
+          const localFiles = createLocalFileStorage(cwd, project, rawVars);
           dataKeys = await localData.list();
           fileKeys = await localFiles.list();
         } else {
           assertCloudEndpointsConfigured();
           const [rawDataKeys, rawFileKeys] = await Promise.all([
-            cosListKeys(`data/${project}/`),
-            cosListKeys(`files/${project}/`),
+            cosListKeys(dataPrefix),
+            cosListKeys(filesPrefix),
           ]);
           dataKeys = rawDataKeys
-            .map((k) => k.slice(`data/${project}/`.length).replace(/\.json$/i, ''))
+            .map((k) => k.slice(dataPrefix.length).replace(/\.json$/i, ''))
             .filter(Boolean);
           fileKeys = rawFileKeys
-            .map((k) => k.slice(`files/${project}/`.length))
+            .map((k) => k.slice(filesPrefix.length))
             .filter((k) => k && !k.endsWith('.__meta__.json'));
         }
 
@@ -784,21 +860,229 @@ export function createConsoleRequestHandler({
           project,
           db: {
             enabled: Boolean(dbProvider),
-            provider: dbProvider || 'sqlite-local',
+            provider: dbProvider || (isLocal ? 'sqlite-local' : null),
+            localSqliteAvailable: isLocal,
+            source: configSource,
             isolation: dbIsolation,
             targetSummary: dbTarget
               ? maskEnvValue(dbTarget)
               : isLocal
-              ? '.myship/data/local.sqlite'
+              ? `.myship/data/${project}/local.sqlite`
               : '未绑定云端数据库',
           },
           storage: {
             enabled: true,
-            dataPrefix: `data/${project}/`,
-            filesPrefix: `files/${project}/`,
+            dataPrefix,
+            filesPrefix,
             dataKeys,
             fileKeys,
           },
+        });
+      }
+
+      if (pathname === '/api/console/kv' && method === 'GET') {
+        const project =
+          normalizeDomainToken(urlObj.searchParams.get('project') || '') ||
+          detectProjectContext(cwd).project;
+        const rawKey = String(urlObj.searchParams.get('key') || '').trim();
+        if (!rawKey) {
+          return sendJson(res, 400, { ok: false, error: '请提供要查看的 KV 存储 key' });
+        }
+        const rawVars = isLocal
+          ? getLocalProjectEnv(project, storageDir)
+          : await getRemoteProjectEnv(project);
+
+        let value = null;
+        let updatedAt = null;
+        if (isLocal) {
+          const localData = createLocalPersistentStorage(cwd, project, rawVars);
+          value = await localData.get(rawKey, undefined);
+        } else {
+          assertCloudEndpointsConfigured();
+          const rawStorageEnv = rawVars.MYSHIP_STORAGE_ENV
+            ? normalizeDomainToken(rawVars.MYSHIP_STORAGE_ENV)
+            : '';
+          const envSub = rawStorageEnv && rawStorageEnv !== 'prod' ? `${rawStorageEnv}/` : '';
+          const safeKey = rawKey
+            .replace(/^\/+|\/+$/g, '')
+            .replace(/\.json$/i, '')
+            .replace(/[^a-zA-Z0-9/_-]/g, '_');
+          const doc = await cosGetJson(`data/${project}/${envSub}${safeKey}.json`);
+          if (doc === null || doc === undefined) {
+            value = undefined;
+          } else if (doc && typeof doc === 'object' && Object.prototype.hasOwnProperty.call(doc, 'value')) {
+            value = doc.value;
+            updatedAt = doc.updatedAt || null;
+          } else {
+            value = doc;
+          }
+        }
+
+        if (value === undefined) {
+          return sendJson(res, 404, { ok: false, error: `未找到 KV 键: ${rawKey}` });
+        }
+
+        const serialized =
+          typeof value === 'string'
+            ? JSON.stringify(value, null, 2)
+            : JSON.stringify(value, null, 2) || String(value);
+        const rawSize = Buffer.byteLength(serialized, 'utf8');
+        const MAX_PREVIEW_BYTES = 262144;
+        const truncated = rawSize > MAX_PREVIEW_BYTES;
+        const formatted = truncated
+          ? `${Buffer.from(serialized, 'utf8').subarray(0, MAX_PREVIEW_BYTES).toString('utf8')}\n/* ... 内容超过 256 KB，已截断预览 ... */`
+          : serialized;
+
+        return sendJson(res, 200, {
+          ok: true,
+          project,
+          key: rawKey,
+          updatedAt,
+          rawSize,
+          truncated,
+          formatted,
+          value: truncated ? null : value,
+        });
+      }
+
+      if (pathname === '/api/console/db-preview' && method === 'GET') {
+        const cwdCtx = detectProjectContext(cwd);
+        const project =
+          normalizeDomainToken(urlObj.searchParams.get('project') || '') || cwdCtx.project;
+        const requestedTable = String(urlObj.searchParams.get('table') || '').trim();
+        const limit = Math.min(
+          Math.max(Number.parseInt(urlObj.searchParams.get('limit') || '50', 10) || 50, 1),
+          100
+        );
+
+        const isSameCwdProject = cwdCtx.project === project;
+        const localResourcesCfg = isSameCwdProject ? cwdCtx.resources : null;
+        const rawVars = isLocal
+          ? getLocalProjectEnv(project, storageDir)
+          : await getRemoteProjectEnv(project);
+
+        const mergedEnv = {
+          ...process.env,
+          ...(localResourcesCfg?.db?.provider ? { MYSHIP_DB_PROVIDER: localResourcesCfg.db.provider } : {}),
+          ...rawVars,
+        };
+
+        // 本地模式下若未配置远端数据库且本地 sqlite 文件尚不存在，直接返回空表清单，避免因查看页面而创建空文件
+        const hasRemoteDb = Boolean(
+          mergedEnv.TURSO_DATABASE_URL ||
+            mergedEnv.NEON_DATABASE_URL ||
+            mergedEnv.CF_D1_DATABASE_ID ||
+            mergedEnv.MYSQL_URL ||
+            mergedEnv.TCB_ENV_ID ||
+            mergedEnv.DATABASE_URL ||
+            mergedEnv.PGHOST
+        );
+        if (isLocal && !hasRemoteDb) {
+          const sqlitePath = resolve(cwd, '.myship', 'data', project, 'local.sqlite');
+          if (!existsSync(sqlitePath)) {
+            return sendJson(res, 200, {
+              ok: true,
+              project,
+              configured: true,
+              provider: 'sqlite-local',
+              emptyFile: true,
+              tables: [],
+              selectedTable: null,
+              columns: [],
+              rows: [],
+            });
+          }
+        }
+
+        const dbClient = createDatabaseClient({
+          cwd,
+          project,
+          env: mergedEnv,
+          preferLocalSqlite: isLocal && !hasRemoteDb,
+        });
+
+        if (!dbClient || dbClient.provider === 'unconfigured') {
+          return sendJson(res, 200, {
+            ok: true,
+            project,
+            configured: false,
+            provider: null,
+            tables: [],
+            selectedTable: null,
+            columns: [],
+            rows: [],
+          });
+        }
+
+        let tableRows = [];
+        const prov = dbClient.provider;
+        if (prov === 'sqlite-local' || prov === 'turso' || prov === 'd1') {
+          tableRows = await dbClient.query(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY name ASC"
+          );
+        } else if (prov === 'mysql') {
+          tableRows = await dbClient.query(
+            "SELECT table_name AS name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' ORDER BY table_name ASC"
+          );
+        } else {
+          tableRows = await dbClient.query(
+            "SELECT table_name AS name FROM information_schema.tables WHERE table_schema = current_schema() AND table_type = 'BASE TABLE' ORDER BY table_name ASC"
+          );
+        }
+
+        const tables = (Array.isArray(tableRows) ? tableRows : [])
+          .map((r) => r.name || r.table_name || r.TABLE_NAME)
+          .filter(Boolean);
+
+        if (requestedTable && !tables.includes(requestedTable)) {
+          return sendJson(res, 404, {
+            ok: false,
+            error: `数据表不存在: ${requestedTable}`,
+          });
+        }
+
+        const selectedTable = requestedTable || tables[0] || null;
+        if (!selectedTable) {
+          return sendJson(res, 200, {
+            ok: true,
+            project,
+            configured: true,
+            provider: prov,
+            tables,
+            selectedTable: null,
+            columns: [],
+            rows: [],
+          });
+        }
+
+        const quotedTable =
+          prov === 'mysql'
+            ? `\`${selectedTable.replace(/`/g, '``')}\``
+            : `"${selectedTable.replace(/"/g, '""')}"`;
+
+        const rows = await dbClient.query(`SELECT * FROM ${quotedTable} LIMIT ${limit}`);
+        let columns = rows.length > 0 && rows[0] ? Object.keys(rows[0]) : [];
+        if (
+          columns.length === 0 &&
+          (prov === 'sqlite-local' || prov === 'turso' || prov === 'd1')
+        ) {
+          try {
+            const colInfo = await dbClient.query(`PRAGMA table_info(${quotedTable})`);
+            columns = (Array.isArray(colInfo) ? colInfo : []).map((c) => c.name).filter(Boolean);
+          } catch {
+            // ignore pragma fallback failure
+          }
+        }
+
+        return sendJson(res, 200, {
+          ok: true,
+          project,
+          configured: true,
+          provider: prov,
+          tables,
+          selectedTable,
+          columns,
+          rows: Array.isArray(rows) ? rows : [],
         });
       }
 
@@ -811,13 +1095,23 @@ export function createConsoleRequestHandler({
           return sendJson(res, 400, { ok: false, error: '请提供要生成预览链接的对象存储文件 key' });
         }
         if (isLocal) {
-          const localFiles = createLocalFileStorage(cwd, project);
+          const rawVars = getLocalProjectEnv(project, storageDir);
+          const localOrigin = `http://${req.headers.host || '127.0.0.1:4200'}`;
+          const localFiles = createLocalFileStorage(cwd, project, {
+            ...process.env,
+            ...rawVars,
+            MYSHIP_DEV_ORIGIN: localOrigin,
+          });
           const url = await localFiles.presignUrl(key, { method: 'GET', expiresSec: 900 });
           return sendJson(res, 200, { ok: true, project, key, url, expiresIn: 900 });
         }
-        const { cosOrigin } = getEffectiveEndpoints();
+        const [rawVars, { cosOrigin }] = await Promise.all([
+          getRemoteProjectEnv(project),
+          Promise.resolve(getEffectiveEndpoints()),
+        ]);
         const cloudStore = createCloudStorage(project, {
           ...process.env,
+          ...rawVars,
           MYSHIP_COS_ORIGIN: cosOrigin,
         });
         const url = await cloudStore.files.presignUrl(key, { method: 'GET', expiresSec: 900 });

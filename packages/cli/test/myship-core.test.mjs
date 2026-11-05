@@ -47,6 +47,8 @@ import {
   createConsoleRequestHandler,
 } from '../myship.mjs';
 import { withKeyWriteLock } from '../project-context.mjs';
+import { createLocalPersistentStorage } from '../storage-client.mjs';
+import { createDatabaseClient } from '../db-client.mjs';
 import { renderConsoleHtml } from '../console-ui.mjs';
 import { startScfRuntimeServer } from '../scf-bootstrap-runtime.mjs';
 import { handleEdgeRequest } from '../../edge-gateway/local-gateway.mjs';
@@ -76,6 +78,18 @@ test('1. Package & module integrity: npm pack includes all CLI modules and exclu
     );
   }
   assert(packedFiles.has('skills/myship-skill/SKILL.md'), 'Tarball must include SKILL.md');
+  assert(
+    packedFiles.has('packages/cli/console/template.html'),
+    'Tarball must include console/template.html'
+  );
+  assert(
+    packedFiles.has('packages/cli/console/styles.css'),
+    'Tarball must include console/styles.css'
+  );
+  assert(
+    packedFiles.has('packages/cli/console/client.js'),
+    'Tarball must include console/client.js'
+  );
   assert(
     packedFiles.has('skills/myship-skill/references/fullstack-runtime.md'),
     'Tarball must include fullstack-runtime.md reference'
@@ -489,6 +503,8 @@ test('5. Lifecycle cleanup (rm & gc --older-than) and Console HTTP API', async (
       });
       const batchEnvJson = await batchEnvRes.json();
       assert.equal(batchEnvJson.ok, true);
+      assert.equal(batchEnvJson.importedCount, 4);
+      assert.equal(batchEnvJson.totalCount, 4);
       assert.equal(batchEnvJson.count, 4);
 
       const envCheckRes = await fetch(`${url}/api/console/env?project=app&reveal=1`);
@@ -497,18 +513,69 @@ test('5. Lifecycle cleanup (rm & gc --older-than) and Console HTTP API', async (
       assert.equal(envCheckJson.vars.API_TOKEN, 'abc');
       assert.equal(envCheckJson.vars.MULTI_LINE, 'line1\nline2');
 
+      const singleKeyEnvRes = await fetch(
+        `${url}/api/console/env?project=app&key=API_TOKEN&reveal=1`
+      );
+      const singleKeyEnvJson = await singleKeyEnvRes.json();
+      assert.equal(singleKeyEnvJson.ok, true);
+      assert.equal(singleKeyEnvJson.exists, true);
+      assert.equal(singleKeyEnvJson.value, 'abc');
+
       const resInspect = await fetch(`${url}/api/console/resources?project=app`);
       const resInspectJson = await resInspect.json();
       assert.equal(resInspectJson.ok, true);
       assert.equal(resInspectJson.db.provider, 'turso');
+      assert.equal(resInspectJson.db.source, 'env');
       assert.equal(resInspectJson.storage.filesPrefix, 'files/app/');
 
+      // Test KV read-only inspector (/api/console/kv) & SQLite table/row preview (/api/console/db-preview)
+      const betaKv = createLocalPersistentStorage(tmpRoot, 'beta');
+      await betaKv.set('site-config', { title: 'Beta Console', theme: 'light' });
+      const kvInspectRes = await fetch(
+        `${url}/api/console/kv?project=beta&key=site-config`
+      );
+      const kvInspectJson = await kvInspectRes.json();
+      assert.equal(kvInspectJson.ok, true);
+      assert.equal(kvInspectJson.value.title, 'Beta Console');
+      assert.equal(kvInspectJson.truncated, false);
+
+      const betaDb = createDatabaseClient({
+        cwd: tmpRoot,
+        project: 'beta',
+        preferLocalSqlite: true,
+      });
+      await betaDb.execute(
+        'CREATE TABLE IF NOT EXISTS articles (id INTEGER PRIMARY KEY, title TEXT)'
+      );
+      await betaDb.execute('INSERT INTO articles (title) VALUES (?)', ['Hello Console DB']);
+      const dbPreviewRes = await fetch(`${url}/api/console/db-preview?project=beta`);
+      const dbPreviewJson = await dbPreviewRes.json();
+      assert.equal(dbPreviewJson.ok, true);
+      assert.equal(dbPreviewJson.configured, true);
+      assert.equal(dbPreviewJson.provider, 'sqlite-local');
+      assert.deepEqual(dbPreviewJson.tables, ['articles']);
+      assert.equal(dbPreviewJson.selectedTable, 'articles');
+      assert.deepEqual(dbPreviewJson.columns, ['id', 'title']);
+      assert.equal(dbPreviewJson.rows.length, 1);
+      assert.equal(dbPreviewJson.rows[0].title, 'Hello Console DB');
+      await betaDb.close();
+
+      // Test local file presign & direct preview download on Console Server
+      const appFiles = createLocalFileStorage(tmpRoot, 'app');
+      await appFiles.put('demo/hello.txt', 'console-file-preview-ok', {
+        contentType: 'text/plain',
+      });
       const presignRes = await fetch(
         `${url}/api/console/file-presign?project=app&key=demo/hello.txt`
       );
       const presignJson = await presignRes.json();
       assert.equal(presignJson.ok, true);
       assert.match(presignJson.url, /\/_myship_files\/app\/demo\/hello\.txt\?method=GET/);
+      const fileDownloadRes = await fetch(presignJson.url);
+      assert.equal(fileDownloadRes.status, 200);
+      assert.equal(fileDownloadRes.headers.get('content-security-policy'), 'sandbox');
+      assert.equal(fileDownloadRes.headers.get('x-content-type-options'), 'nosniff');
+      assert.equal(await fileDownloadRes.text(), 'console-file-preview-ok');
 
       const logsRes = await fetch(`${url}/api/console/logs?project=app&limit=10`);
       const logsJson = await logsRes.json();
@@ -532,6 +599,10 @@ test('6. Fail-closed cloud abort before delete & live frontend runGc request pay
     gcKeepInput: { value: '10', disabled: false, style: {}, title: '' },
     gcResultBox: { textContent: '', innerHTML: '' },
     backendStatusSummary: { innerHTML: '', textContent: '' },
+    logsContainer: { innerHTML: '', textContent: '' },
+    logsSummaryText: { innerHTML: '', textContent: '' },
+    envKeyInput: { value: 'OLD_KEY', disabled: true, style: {} },
+    envValInput: { value: 'OLD_SECRET', disabled: false, style: {} },
     toast: { textContent: '', style: {} },
   };
   let capturedGcPayload = null;
@@ -555,6 +626,28 @@ test('6. Fail-closed cloud abort before delete & live frontend runGc request pay
               orphanFnsCount: 0,
               activeRoutes: [],
             },
+          }),
+        };
+      }
+      if (String(url).startsWith('/api/console/logs')) {
+        return {
+          ok: true,
+          json: async () => ({
+            ok: true,
+            functionName: 'myship-app',
+            logs: [
+              {
+                timestamp: '2026-11-05T12:00:00.000Z',
+                requestId: 'req_123',
+                method: 'GET',
+                path: '/api/health',
+                status: 200,
+                durationMs: 12,
+                level: 'INFO',
+                scfVersion: '1',
+                lines: [{ level: 'INFO', text: 'health check passed' }],
+              },
+            ],
           }),
         };
       }
@@ -616,6 +709,51 @@ test('6. Fail-closed cloud abort before delete & live frontend runGc request pay
   assert.match(elements.backendStatusSummary.innerHTML, /已回滚偏离/);
   assert.match(elements.backendStatusSummary.innerHTML, /Nodejs18\.15/);
   assert.doesNotMatch(elements.backendStatusSummary.innerHTML, /Nodejs20\.19/);
+
+  // Verify resolveProjectAccessState does NOT mistake custom alias for primary domain and detects disabled target deployment
+  const unboundState = sandbox.resolveProjectAccessState({
+    name: 'app',
+    aliases: [{ subdomain: 'app-staging', deploymentId: 'dpl_v2' }],
+    manifests: [{ id: 'dpl_v2' }],
+  });
+  assert.equal(unboundState.code, 'unbound');
+  assert.equal(unboundState.primaryAlias, null);
+  assert.equal(unboundState.activeManifest, null);
+
+  const disabledTargetState = sandbox.resolveProjectAccessState({
+    name: 'app',
+    aliases: [{ subdomain: 'app', deploymentId: 'dpl_v2' }],
+    manifests: [{ id: 'dpl_v2', disabled: true, disabledReason: '紧急熔断' }],
+  });
+  assert.equal(disabledTargetState.code, 'version-disabled');
+  assert.equal(disabledTargetState.reason, '紧急熔断');
+
+  // Verify resolveRollbackCandidate skips disabled previousDeploymentId and picks older healthy manifest
+  const rbTarget = sandbox.resolveRollbackCandidate(
+    {
+      name: 'app',
+      manifests: [
+        { id: 'dpl_v3' },
+        { id: 'dpl_v2', disabled: true },
+        { id: 'dpl_v1' },
+      ],
+    },
+    { subdomain: 'app', deploymentId: 'dpl_v3', previousDeploymentId: 'dpl_v2' }
+  );
+  assert.equal(rbTarget.id, 'dpl_v1');
+
+  // Verify loadLogs renders timestamp, method/path, lines[].text, and marks INFO 200 as non-error
+  await sandbox.loadLogs();
+  assert.match(elements.logsContainer.innerHTML, /GET \/api\/health/);
+  assert.match(elements.logsContainer.innerHTML, /health check passed/);
+  assert.match(elements.logsContainer.innerHTML, /badge-green/);
+  assert.doesNotMatch(elements.logsContainer.innerHTML, /badge-red/);
+
+  // Verify selectProject clears editing env form state
+  sandbox.selectProject('other-proj');
+  assert.equal(elements.envKeyInput.value, '');
+  assert.equal(elements.envKeyInput.disabled, false);
+  assert.equal(elements.envValInput.value, '');
 
   const writeRequests = [];
   let responseMode = 'incomplete';

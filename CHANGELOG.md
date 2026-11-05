@@ -4,6 +4,36 @@ All notable changes to **MyShip (`@myship/cli`)** are documented in this file.
 
 ---
 
+## [v0.4.5] — Web 控制台 (`myship console`) 焕新重写与数据只读探索器
+
+### ✨ 核心亮点 (Highlights)
+- **🎨 Web 控制台 (`myship console`) 全面焕新重写**：
+  - **明快浅色优先视觉体系 (Light-First Design System)**：对齐在线门户的石板暖白主调与一键暗色模式切换，将原零散的多面板重构为 **「发布与域名 · 数据与配置 · 运行日志 · 危险区」** 4 个高内聚工作区，并支持全局快捷键（`⌘/Ctrl+K` 快速搜索切换项目、`1-4` 切换标签页、`R` 刷新、`Esc` 关闭抽屉/弹窗）。
+  - **发布与域名一体指挥台 (Unified Releases & Domains Deck)**：把主域名、自定义子域名 (`alias`)、当前生效指针与版本发布时间线整合到同一视图，支持在控制台直接填写下线维护原因 (`--reason`)、一键切换整项目/子域名/单构建版本上下线，并自动同步全局 `_routing_index.json` 状态。
+- **🔍 数据与配置全栈只读探索器 (Data & Config Inspector)**：
+  - **对象存储 (`context.files`) 安全预览抽屉**：支持列出文件树，并在右侧抽屉直接预览图片、音视频、文本/JSON（本地网关启用 `CSP: sandbox` + `nosniff` 安全隔离，云端自动合并项目级 `MYSHIP_STORAGE_ENV` 签发临时预签名 URL）。
+  - **KV 存储 (`context.storage`) JSON 探索器**：新增只读 KV 键值列表与格式化 JSON 树抽屉（带 256KB 大值截断保护）。
+  - **关系型数据库 (`context.db`) 表结构与样本行预览**：支持 SQLite / Turso / D1 / PostgreSQL / Neon / MySQL 表清单、近似行数与前 20 行安全只读预览。
+  - **环境变量行内编辑与批量导入 Diff 预览**：支持单 Key 独立显隐明文、行内编辑单条变量，以及 `.env` 批量粘贴前的 `新增 / 修改 / 不变` 变更对比确认。
+- **🧱 静态资源解耦 (`packages/cli/console/`) 与危险区隔离**：将控制台前端拆分为独立原生静态文件（`template.html` / `styles.css` / `client.js`），保持零构建与零运行时依赖的同时大幅提升可维护性；将彻底销毁项目与全局 CAS 垃圾回收 (`GC`) 隔离至独立危险区，支持先 Dry-Run 预览孤儿数据块与过期清单再执行清理。
+
+### 🛠️ 关键命令速览
+```bash
+# 安装或升级至 v0.4.5
+npm install -g @myship/cli@0.4.5
+
+# 启动本地或云端可视化管控台（默认自动打开浏览器）
+myship console
+myship console --port 4399 --no-open
+```
+
+### 📦 发行产物与校验
+- **NPM 官方包 (含 SLSA Provenance 签名)**：[`@myship/cli@0.4.5`](https://www.npmjs.com/package/@myship/cli/v/0.4.5)
+- **在线门户与文档中心**：[https://myship.ship.onehub.top](https://myship.ship.onehub.top)
+- **完整代码变更对比**：[`v0.4.4...v0.4.5`](https://github.com/huxy2023/myship/compare/v0.4.4...v0.4.5)
+
+---
+
 ## [v0.4.4] — 可逆上下线与漏洞版本秒级封禁 (`myship offline` / `myship online`)
 
 ### ✨ 核心亮点 (Highlights)
